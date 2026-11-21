@@ -1,0 +1,2 @@
+{"hit_id": "H-1", "alert_id": "A-1", "decision": "DIFFERENT_ENTITY", "reason_codes": "ENTITY_TYPE_MISMATCH", "customer_record_ids": "CUS-1", "evidence": "CUS-1"}
+{"hit_id": "H-2", "alert_id": "A-1", "decision": "SAME_ENTITY", "reason_codes": "NAME_DOB_LOCATION_MATCH; NAME_DOB_MATCH", "customer_record_ids": "CUS-1", "evidence": "CUS-1; KYC-1"}

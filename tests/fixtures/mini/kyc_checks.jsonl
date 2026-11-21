@@ -1,0 +1,2 @@
+{"check_id": "KYC-1", "applicant_id": "APP-1", "verified_name": "Jane Example", "verified_dob": "1980-01-02", "document_country": "United Kingdom", "result": "approved", "checked_at": "2024-01-02"}
+{"check_id": "KYC-2", "applicant_id": "APP-1", "verified_name": "Jane Exampel", "verified_dob": "1980-01-02", "document_country": "United Kingdom", "result": "rejected", "checked_at": "2024-03-01"}

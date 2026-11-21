@@ -1,0 +1,3 @@
+{"hit_id": "H-1", "alert_id": "A-1", "match_score": 95, "entity_type": "Company", "name": "Jane Example Ltd", "countries": "United Kingdom"}
+{"hit_id": "H-2", "alert_id": "A-1", "match_score": 99, "entity_type": "Individual", "name": "EXAMPLE, Jane", "dobs": "1980; 1981", "countries": "United Kingdom"}
+{"hit_id": "H-3", "alert_id": "A-2", "match_score": 90, "entity_type": "Company", "name": "Joint Holder SA", "countries": "Spain"}

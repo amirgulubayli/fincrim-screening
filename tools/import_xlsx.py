@@ -75,7 +75,7 @@ def main() -> int:
             for row in rows:
                 if all(v is None for v in row):
                     continue
-                rec = {h: _cell(v) for h, v in zip(header, row)}
+                rec = {h: _cell(v) for h, v in zip(header, row, strict=False)}
                 fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 n += 1
         print(f"{filename:<24} {n:>7} rows")

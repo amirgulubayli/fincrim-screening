@@ -1,0 +1,38 @@
+name: Task
+description: A unit of work a human or an agent can claim with `python tools/task.py claim <N>`
+labels: ["status:ready"]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [engine, rules, data, dashboard, demo, docs, infra]
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Why this matters. Cite SOP principle numbers (POLICY.md) where relevant.
+    validations:
+      required: true
+  - type: input
+    id: files
+    attributes:
+      label: Primary file(s) to touch
+      description: Prefer one file per task to avoid merge conflicts.
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      value: |
+        - [ ] Unit tests in tests/
+        - [ ] `screen eval` shows 0 unsafe clearances
+        - [ ] `screen repro --runs 5` byte-identical
+    validations:
+      required: true
+  - type: textarea
+    id: verify
+    attributes:
+      label: How to verify
+      render: shell

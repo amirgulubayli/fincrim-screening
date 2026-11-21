@@ -1,0 +1,2 @@
+{"alert_id": "A-1", "screened_at": "2026-11-06", "customer_name": "Jane Example", "entity_type": "Individual", "dob": "1980-01-02", "account_ref": "ACC-1", "hit_count": 2, "hit_ids": "H-1; H-2"}
+{"alert_id": "A-2", "screened_at": "2026-11-06", "customer_name": "Joint Holder", "entity_type": "Individual", "account_ref": "ACC-2", "hit_count": 1, "hit_ids": ["H-3"]}
