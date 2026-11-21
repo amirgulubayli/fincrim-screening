@@ -1,0 +1,76 @@
+# How it works (plain English)
+
+## The task, in one line
+
+For every screening **hit**, decide whether the listed person or company **is** our customer:
+`DIFFERENT_ENTITY` (clear it), `SAME_ENTITY` (send to compliance) or `REVIEW` (a person decides).
+Each decision comes with one reason code, the customer record used, a 2–4 sentence reason and the IDs of
+the records it rests on.
+
+## Is it AI? Is it Grok? Is it a CLI?
+
+| Question | Answer |
+|---|---|
+| Who makes the decisions? | **Deterministic rules written in plain Python** (standard library only). No AI model is involved, so the same input always gives the same output. |
+| Is it AI-driven? | **No.** That is deliberate: banks need decisions that can be explained and reproduced. AI agents (Claude Code, Grok Build) were used to **build** the rules quickly, not to make decisions. |
+| Where does Grok fit? | Grok **operates and narrates** the system through a plugin: it starts the dashboard, runs the engine, explains a hit in analyst language using only what the engine returned, and posts a morning health check. It can never change a decision. |
+| Is it a CLI? | The engine is a **Python program with a command line**. `system/run <data> <output>` is the entry point the organisers score. `screen ...` commands are for people and bots. The dashboard embeds that same CLI as a terminal, and the Grok plugin calls the same engine. |
+
+## What "the deterministic compiler" means
+
+The bank's SOP (`POLICY.md`) is a set of written principles. We "compile" them into code in three stages:
+
+```
+ data files ──► 1. FACTS ──► 2. RULES ──► 3. COMPILER ──► decision + reason code + evidence + tier
+```
+
+1. **Facts (formalisation layer).** Messy data becomes comparable values:
+   - dates in many formats become year/month/day, with unknown parts kept unknown;
+   - countries written as codes, names or nationalities become one country;
+   - names are compared using variants, typos and joined forms;
+   - the customer is resolved across 5 systems that share no single key, merging records that are the same person and taking the latest **approved** identity check;
+   - the hit's DOB is taken from its own field, else its profile text, else relevant web results.
+2. **Rules (one per SOP check).** Each rule looks at one facet: entity type, deceased, too young/not yet incorporated, date of birth, name, location. It returns only **agree**, **contradict** or **no verdict**, citing record IDs. A missing fact is never a contradiction.
+3. **Compiler (fixed precedence, written once).**
+   - Any contradiction clears the hit, except a country difference alone when name and DOB agree, which goes to REVIEW.
+   - A person needs name + DOB agreement to confirm; a company needs name + country.
+   - Anything else is REVIEW.
+   - If several customers fit the alert and they lead to different outcomes, the hit goes to REVIEW.
+
+Every decision keeps its **trace**: which rule fired, on which facts, citing which records. That trace
+is what the dashboard and the reason text show.
+
+## Two independent engines (dual control)
+
+Our final system runs **two** independent rule engines on every hit, like four-eyes review in code:
+
+| | Decision core | Independent check |
+|---|---|---|
+| Built by | teammate `akhackathon222` (AML Bot, with Head-of-FinCrime policy calls and its own re-verifier of every clearance) | the team, as the modular facts -> rules -> compiler pipeline above |
+| Role | makes the decision | second opinion + the per-facet trace |
+
+How they combine:
+- they agree: automated;
+- the core clears but the check confirms a match: **REVIEW** (never clear on a conflict);
+- any other disagreement: the core's decision stands but goes to a **second person** (Borderline tier).
+
+## Human in the loop
+
+| Tier | What happens |
+|---|---|
+| Auto-cleared | hard, well-evidenced contradiction; both engines agree |
+| Auto-escalated | confirmed match, sent to the compliance team |
+| Borderline | decided, but the engines disagree or a fact is weak (e.g. DOB only from a web result), so a second person checks it |
+| Human review | the SOP says a person must decide; the reason ends with a "Reviewer: ..." instruction where policy applies |
+
+## Our answer to the brief
+
+| The brief asks for | Where it is |
+|---|---|
+| A runnable system: `system/run <data folder> <output file>` | `system/run` (Python standard library, reads only that folder, ~75 s per run) |
+| One JSON line per hit with `hit_id, alert_id, decision, reason_code, customer_record_id, reason, evidence` | `output/dev.jsonl` (all 819 dev hits) |
+| A README covering architecture, resolution, evidence, determinism, model use, time/cost, worked examples | `system/README.md` |
+| The same result on every run | 5 fresh runs with different hash seeds give byte-identical output (`docs/RESULTS.md`) |
+| A public GitHub repo with `system/` and `output/`, no data, no keys | https://github.com/amirgulubayli/fincrim-screening |
+
+All numbers come from **`docs/RESULTS.md`**, generated by `python tools/scorecard.py`.

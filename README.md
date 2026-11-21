@@ -1,5 +1,7 @@
 # fincrim-screening
 
+> **Start here:** [How it works, in plain English](docs/HOW_IT_WORKS.md) · [Results scorecard](docs/RESULTS.md) (all numbers come from here) · [Run it with your Grok Bot](GROKBOT.md) · one command: `python tools/launch.py up --data data/dev`
+
 Track: **"Is my customer sanctioned?"** (Diligent). A screening tool compares customers with sanctions, PEP, enforcement and adverse-media lists and raises hits on similar names. For every hit this engine decides `DIFFERENT_ENTITY` (clear), `SAME_ENTITY` (escalate) or `REVIEW` (a person looks), with one reason code, the resolved customer record, a 2-4 sentence reason and the evidence IDs it relied on. Decisions are deterministic, rule-based (one rule per SOP principle) and fully traceable; no LLM sits in the decision path. Every decision is also routed to a human-in-the-loop tier:
 
 | Tier | When | Who acts |

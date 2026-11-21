@@ -1,0 +1,100 @@
+{
+  "generated": "2026-11-21 14:47",
+  "engine_version": "0.1.0",
+  "machine": "Windows ARM64, Python 3.14.0",
+  "dataset": {
+    "alerts": 440,
+    "hits": 819,
+    "customers": 72265,
+    "accounts": 86659,
+    "onboarding": 72265,
+    "kyc_checks": 54488,
+    "notes": 31895,
+    "search_results": 16882,
+    "practice_labels": 50
+  },
+  "practice_labels": {
+    "labelled_hits": 50,
+    "decision_score": 0.9722,
+    "decision_accuracy": 0.98,
+    "unsafe_clearances": 0,
+    "review_rate": 0.22,
+    "reason_code_accuracy_on_correct": 1.0,
+    "customer_id_accuracy_on_correct": 1.0,
+    "evidence_precision": 1.0,
+    "evidence_recall": 0.9907,
+    "confusion": {
+      "DIFFERENT_ENTITY->DIFFERENT_ENTITY": 27,
+      "DIFFERENT_ENTITY->REVIEW": 1,
+      "REVIEW->REVIEW": 10,
+      "SAME_ENTITY->SAME_ENTITY": 12
+    }
+  },
+  "all_hits": {
+    "hits": 819,
+    "decisions": {
+      "DIFFERENT_ENTITY": 430,
+      "REVIEW": 266,
+      "SAME_ENTITY": 123
+    },
+    "tiers": {
+      "AUTO_CLEAR": 395,
+      "HUMAN_REVIEW": 266,
+      "BORDERLINE": 60,
+      "AUTO_ESCALATE": 98
+    },
+    "fully_automated_pct": 60.2,
+    "decided_by_engine_pct": 67.5,
+    "cleared_pct": 52.5,
+    "alerts_fully_cleared": 155,
+    "alerts": 440,
+    "engine_agreement_pct": 99.3,
+    "engines_disagree": 6,
+    "engines_conflict": 0,
+    "escalated_by_policy": 35,
+    "review_reasons": {
+      "name and country agree but no usable hit DOB (SOP requires review)": 219,
+      "cautious policy call (Head of FinCrime)": 35,
+      "several customers fit and lead to different outcomes": 12
+    }
+  },
+  "performance": {
+    "load_seconds": 9.5,
+    "run_seconds": 58.7,
+    "api_cost": "0 (no model calls)"
+  },
+  "reproducibility": {
+    "runs": 5,
+    "byte_identical": true,
+    "decision_reproducibility": 1.0,
+    "sha256": "8711e4efd0d83a25c356bd6cec00f9a28ad4623433e69826574c810043384468",
+    "seconds_per_run": [
+      59.17,
+      74.06,
+      86.02,
+      69.83,
+      67.1
+    ]
+  },
+  "solution": {
+    "decision_engines": 2,
+    "core": "AML Bot reference engine (teammate, PR #28): 8-step rule order + independent second_check",
+    "check_rule_modules": [
+      "deceased",
+      "dob",
+      "entity_type",
+      "location",
+      "name",
+      "temporal"
+    ],
+    "reason_codes": 11,
+    "policies": {
+      "sop": 9,
+      "hofc": 9,
+      "dual_control": 3
+    },
+    "policies_total": 21,
+    "llm_in_decision_path": false,
+    "standard_library_only": true
+  }
+}
