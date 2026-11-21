@@ -1,5 +1,5 @@
 {
-  "generated": "2026-11-21 14:47",
+  "generated": "2026-11-21 15:20",
   "engine_version": "0.1.0",
   "machine": "Windows ARM64, Python 3.14.0",
   "dataset": {
@@ -33,23 +33,23 @@
   "all_hits": {
     "hits": 819,
     "decisions": {
-      "DIFFERENT_ENTITY": 430,
+      "DIFFERENT_ENTITY": 431,
       "REVIEW": 266,
-      "SAME_ENTITY": 123
+      "SAME_ENTITY": 122
     },
     "tiers": {
-      "AUTO_CLEAR": 395,
+      "AUTO_CLEAR": 396,
       "HUMAN_REVIEW": 266,
-      "BORDERLINE": 60,
+      "BORDERLINE": 59,
       "AUTO_ESCALATE": 98
     },
-    "fully_automated_pct": 60.2,
+    "fully_automated_pct": 60.3,
     "decided_by_engine_pct": 67.5,
-    "cleared_pct": 52.5,
+    "cleared_pct": 52.6,
     "alerts_fully_cleared": 155,
     "alerts": 440,
-    "engine_agreement_pct": 99.3,
-    "engines_disagree": 6,
+    "engine_agreement_pct": 99.4,
+    "engines_disagree": 5,
     "engines_conflict": 0,
     "escalated_by_policy": 35,
     "review_reasons": {
@@ -59,21 +59,21 @@
     }
   },
   "performance": {
-    "load_seconds": 9.5,
-    "run_seconds": 58.7,
+    "load_seconds": 8.4,
+    "run_seconds": 49.0,
     "api_cost": "0 (no model calls)"
   },
   "reproducibility": {
     "runs": 5,
     "byte_identical": true,
     "decision_reproducibility": 1.0,
-    "sha256": "8711e4efd0d83a25c356bd6cec00f9a28ad4623433e69826574c810043384468",
+    "sha256": "7d79c788602ff6f2db8c3546a9e415edeaf648ff11f3a2b8eea18ef2f9be8c5d",
     "seconds_per_run": [
-      59.17,
-      74.06,
-      86.02,
-      69.83,
-      67.1
+      61.92,
+      57.95,
+      55.47,
+      60.47,
+      60.71
     ]
   },
   "solution": {

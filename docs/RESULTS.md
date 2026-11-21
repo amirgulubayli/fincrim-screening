@@ -1,6 +1,6 @@
 # Results (standard scorecard)
 
-Generated 2026-11-21 14:47 by `python tools/scorecard.py` (engine 0.1.0, Windows ARM64, Python 3.14.0). **Quote numbers only from this file.** Dev set: 819 hits, 440 alerts, 72,265 customer records.
+Generated 2026-11-21 15:20 by `python tools/scorecard.py` (engine 0.1.0, Windows ARM64, Python 3.14.0). **Quote numbers only from this file.** Dev set: 819 hits, 440 alerts, 72,265 customer records.
 
 ## 1. Accuracy on the 50 practice labels (the organisers' cost model)
 
@@ -18,13 +18,13 @@ Generated 2026-11-21 14:47 by `python tools/scorecard.py` (engine 0.1.0, Windows
 
 | Tier | Hits | Meaning |
 |---|---|---|
-| Auto-cleared | 395 | hard contradiction, both engines agree |
+| Auto-cleared | 396 | hard contradiction, both engines agree |
 | Auto-escalated | 98 | confirmed match -> compliance team |
-| Borderline (4-eyes) | 60 | decided, but engines disagree or a fact is weak |
+| Borderline (4-eyes) | 59 | decided, but engines disagree or a fact is weak |
 | Human review | 266 | SOP says REVIEW |
 
-- Fully automated: **60.2%**; decided by the engine (cleared or confirmed): **67.5%**; cleared: 52.5%; alerts fully closed: 155 / 440.
-- Two engines agree on **99.3%** of hits (6 disagree, 0 conflict).
+- Fully automated: **60.3%**; decided by the engine (cleared or confirmed): **67.5%**; cleared: 52.6%; alerts fully closed: 155 / 440.
+- Two engines agree on **99.4%** of hits (5 disagree, 0 conflict).
 - Why hits go to review:
   - name and country agree but no usable hit DOB (SOP requires review): 219
   - cautious policy call (Head of FinCrime): 35
@@ -32,8 +32,8 @@ Generated 2026-11-21 14:47 by `python tools/scorecard.py` (engine 0.1.0, Windows
 
 ## 3. Reproducibility and cost
 
-- 5 fresh runs (different PYTHONHASHSEED): byte-identical = **True**, decision reproducibility 100%, sha256 `8711e4efd0d83a25...`
-- One run: 58.7 s (of which data load 9.5 s); limit is 30 min. API cost: 0 (no model calls).
+- 5 fresh runs (different PYTHONHASHSEED): byte-identical = **True**, decision reproducibility 100%, sha256 `7d79c788602ff6f2...`
+- One run: 49.0 s (of which data load 8.4 s); limit is 30 min. API cost: 0 (no model calls).
 
 ## 4. The solution in numbers
 
