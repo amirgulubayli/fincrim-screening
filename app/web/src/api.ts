@@ -1,5 +1,49 @@
 export type Tier = "AUTO_CLEAR" | "AUTO_ESCALATE" | "BORDERLINE" | "HUMAN_REVIEW";
 export type CaseStatus = "AUTOMATED" | "OPEN" | "AWAITING_SECOND" | "CLOSED";
+/** Dual control: decision core vs independent rule check. */
+export type Agreement = "AGREE" | "DISAGREE" | "CONFLICT" | "UNAVAILABLE";
+export const ENGINE_FLAGS = ["ENGINES_DISAGREE", "ENGINES_CONFLICT", "ESCALATED_BY_POLICY"] as const;
+export type EngineFlag = (typeof ENGINE_FLAGS)[number];
+
+export interface EngineVerdict {
+  decision: string | null;
+  reason_code: string | null;
+  reason: string;
+  evidence: string[];
+  customer_record_id: string | null;
+  tier?: string;
+  flags?: string[];
+}
+
+export interface Engines {
+  core: EngineVerdict | null;
+  check: EngineVerdict | null;
+  agreement: Agreement;
+  escalated_by_policy: boolean;
+  reviewer_action: string | null;
+}
+
+export interface EngineSummary {
+  agreement: Partial<Record<Agreement, number>>;
+  compared: number;
+  agreement_rate: number | null;
+  escalated_by_policy: number;
+  with_reviewer_action: number;
+  pairs: Record<string, number>;
+  mode: string;
+}
+
+export interface Health {
+  ok: boolean;
+  ready: boolean;
+  status: "loading" | "ready" | "error";
+  stage: string | null;
+  progress: { done: number; total: number } | null;
+  elapsed_seconds: number;
+  error: string | null;
+  engine_version: string;
+  data: string;
+}
 
 export interface ReproReport {
   byte_identical: boolean;
@@ -27,6 +71,7 @@ export interface Summary {
   flags: Record<string, number>;
   rule_stats: Record<string, Record<string, number>>;
   automation: { automated: number; needs_human: number; rate: number | null };
+  engines?: EngineSummary;
   load_seconds: number;
   run_seconds: number;
   ran_at: string;
@@ -55,6 +100,10 @@ export interface Row {
   review: string | null;
   status: CaseStatus;
   final_decision: string | null;
+  agreement?: Agreement | null;
+  core_decision?: string | null;
+  check_decision?: string | null;
+  reviewer_action?: boolean;
 }
 
 export interface TraceRow {
@@ -107,6 +156,7 @@ export interface Detail {
     reason: string;
     evidence: string[];
     trace: TraceRow[];
+    engines?: Engines;
   };
   hit: Rec;
   alert: Rec | null;
@@ -139,6 +189,7 @@ async function j<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  health: () => j<Health>("/api/health"),
   summary: () => j<Summary>("/api/summary"),
   decisions: () => j<Row[]>("/api/decisions"),
   hit: (id: string) => j<Detail>(`/api/hits/${encodeURIComponent(id)}`),

@@ -6,6 +6,11 @@ results, plus a Vite + React UI (`app/web`):
 - **Review queue** by tier, worked in the order a person needs them: *Needs analyst review*,
   *Borderline — 4-eyes check*, *Auto-escalated to compliance*, *Auto-cleared (hard contradiction)*.
   Each row has a one-line "why this tier". Filter by reason code, weak-evidence flag and case status.
+- **Two independent engines** (dual control) in every case file: the decision core's verdict + reason next
+  to the independent rule check's verdict + facet results, with an AGREE / DISAGREE / CONFLICT badge. When the
+  reason carries a `Reviewer: ...` instruction it is shown as a highlighted **Reviewer action** callout.
+  Queue filter chips for `ENGINES_DISAGREE`, `ENGINES_CONFLICT`, `ESCALATED_BY_POLICY`; header KPIs for engine
+  agreement rate and hits escalated by policy.
 - **Case file** per hit: decision + reason code + reason, customer vs watchlist comparison with
   agree / contradict / not decisive / not checked markers taken from the rule trace, the resolution
   path, evidence chips that open the underlying record, and the rule trace as a timeline.
@@ -19,7 +24,9 @@ results, plus a Vite + React UI (`app/web`):
 - A live `screen ...` terminal.
 
 The data folder comes from `SCREEN_DATA` (default `data/dev`; relative paths resolve from the repo
-root, absolute Windows paths are fine). Startup loads the dataset (~15 s) before the API answers.
+root, absolute Windows paths are fine). Startup screens every hit with both engines (~70-85 s on dev) in a
+background thread: `/api/health` answers at once with `ready`, `stage` and progress, data endpoints return 503
+until ready, and the UI shows a loading screen meanwhile.
 
 ## Dev (two terminals, from the repo root)
 
@@ -49,17 +56,17 @@ Open http://localhost:8000 (the server serves `app/web/dist` when it exists).
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/health` | ready flag |
-| GET | `/api/summary` | counts by decision / tier / reason / flag, rule stats, automation rate, case status, eval vs practice labels, repro state |
-| GET | `/api/decisions?tier=&decision=&q=` | queue rows (with case status and latest analyst decision) |
-| GET | `/api/hits/{hit_id}` | decision + trace, raw hit, alert, resolved customer records / KYC / notes, reviews, case status |
+| GET | `/api/health` | readiness: `ready`, `status` (loading / ready / error), `stage`, `progress`, `elapsed_seconds`, `error` |
+| GET | `/api/summary` | counts by decision / tier / reason / flag, rule stats, automation rate, `engines` (agreement counts + rate, core/check pairs, escalated by policy), case status, eval vs practice labels, repro state |
+| GET | `/api/decisions?tier=&decision=&q=&engine_flag=` | queue rows (case status, latest analyst decision, `agreement`, core / check decision); `engine_flag` = ENGINES_DISAGREE \| ENGINES_CONFLICT \| ESCALATED_BY_POLICY |
+| GET | `/api/hits/{hit_id}` | decision + trace + `engines` (core verdict, check verdict, agreement, reviewer_action), raw hit, alert, resolved customer records / KYC / notes, reviews, case status |
 | GET | `/api/records/{id}` | read-only lookup of any record id (customer, KYC check, note, search result, hit, alert, account, KYC applicant) |
 | POST | `/api/hits/{hit_id}/review` | `{decision: CONFIRM\|SAME_ENTITY\|DIFFERENT_ENTITY\|REVIEW, note, analyst}`; note and analyst required |
 | GET | `/api/reviews` | audit trail, newest first |
 | GET | `/api/reviews.csv` | audit trail export |
 | GET / POST | `/api/repro` | read `output/repro/report.json` / start a 5-run `screen repro` in the background |
 | POST | `/api/run` | re-run the engine |
-| WS | `/api/terminal` | one command line at a time; only `screen run\|explain\|eval\|repro\|summary ...`, no shell metacharacters; runs `python system/screen.py ...` without a shell |
+| WS | `/api/terminal` | one command line at a time; only `screen run\|explain\|eval\|repro\|summary\|diff\|queue\|policy ...` (flags such as `--engine`, `eval --compare` pass through), no shell metacharacters; runs `python system/screen.py ...` without a shell |
 
 Terminal: `--data` defaults to the server's `SCREEN_DATA`, so `screen eval`, `screen summary` and
 `screen explain H-123456` need no path; `screen run` writes `output/terminal_run.jsonl`. Backslashes

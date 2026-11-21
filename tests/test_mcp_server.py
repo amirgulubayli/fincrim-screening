@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -11,7 +12,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SERVER = ROOT / ".grok" / "plugins" / "fincrim-screening" / "mcp" / "server.py"
 MINI = ROOT / "tests" / "fixtures" / "mini"
-EXPECTED_TOOLS = {"screen_summary", "screen_run", "screen_explain", "review_queue", "screen_eval", "screen_repro"}
+EXPECTED_TOOLS = {"screen_summary", "screen_run", "screen_explain", "review_queue", "screen_eval", "screen_repro",
+                  "engine_diff", "policy_list"}
+
+
+def _module():
+    spec = importlib.util.spec_from_file_location("fincrim_mcp_server", SERVER)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def _session(messages: list[dict]) -> list[dict]:
@@ -86,3 +95,47 @@ def test_errors_are_well_formed():
     assert replies[1]["error"]["code"] == -32602
     assert replies[2]["error"]["code"] == -32601
     assert replies[3]["result"] == {}
+
+
+def test_dual_control_tools():
+    replies = _session([
+        _req(1, "tools/call", {"name": "screen_explain", "arguments": {"hit_id": "H-2"}}),
+        _req(2, "tools/call", {"name": "engine_diff", "arguments": {}}),
+        _req(3, "tools/call", {"name": "engine_diff", "arguments": {"agreement": "AGREE", "limit": 1}}),
+        _req(4, "tools/call", {"name": "policy_list", "arguments": {}}),
+        _req(5, "tools/call", {"name": "engine_diff", "arguments": {"agreement": "MAYBE"}}),
+    ])
+    explain, diff, agree, policies = (r["result"]["structuredContent"] for r in replies[:4])
+    # screen_explain: both engines' verdicts, agreement status and the reviewer action
+    assert {"core_verdict", "check_verdict", "agreement", "reviewer_action", "escalated_by_policy"} <= explain.keys()
+    assert explain["trace"][0]["rule_id"] == "CORE.aml"
+    assert explain["core_verdict"]["decision"] == explain["decision"]
+    assert explain["agreement"] in {"AGREE", "DISAGREE", "CONFLICT", "UNAVAILABLE"}
+    if explain["core_verdict"]["decision"] == explain["check_verdict"]["decision"]:
+        assert explain["agreement"] == "AGREE"
+    # engine_diff: pair counts cover every hit; default list = hits that are not AGREE
+    assert sum(diff["pairs"].values()) == diff["hits"] == 3
+    assert sum(diff["agreement"].values()) == 3
+    assert diff["total"] == 3 - diff["agreement"].get("AGREE", 0) == len(diff["list"])
+    assert agree["shown"] == min(1, agree["total"]) and all(r["agreement"] == "AGREE" for r in agree["list"])
+    # policy_list: system/screening/policy.py if it exists, else the built-in HoFC calls
+    assert policies["count"] == len(policies["policies"]) > 0
+    assert all("id" in p for p in policies["policies"])
+    assert replies[4]["result"]["isError"] is True
+
+
+def test_reviewer_action_and_agreement():
+    m = _module()
+    conflict = ("Escalated, not cleared: the decision core found a contradiction but the independent rule check "
+                "confirms the match (NAME_DOB_MATCH). Reviewer: compare the customer's verified identity with the "
+                "hit. Core: The customer's DOB differs. Reviewer: something else.")
+    assert m.reviewer_action(conflict) == "compare the customer's verified identity with the hit."
+    assert m.reviewer_action("Escalated, not cleared: x. Reviewer: read the date and compare it.") == \
+        "read the date and compare it."
+    assert m.reviewer_action("No instruction here.", None) is None
+    assert m.reviewer_action("plain", "Escalated: y. Reviewer: check the listing.") == "check the listing."
+    assert m._agreement("SAME_ENTITY", "SAME_ENTITY", ()) == "AGREE"
+    assert m._agreement("DIFFERENT_ENTITY", "SAME_ENTITY", ()) == "CONFLICT"
+    assert m._agreement("REVIEW", "SAME_ENTITY", ("ENGINES_CONFLICT",)) == "CONFLICT"
+    assert m._agreement("REVIEW", "DIFFERENT_ENTITY", ("ENGINES_DISAGREE",)) == "DISAGREE"
+    assert m._agreement("REVIEW", None, ()) == "UNAVAILABLE"

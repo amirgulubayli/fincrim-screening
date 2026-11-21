@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -27,14 +28,16 @@ from pathlib import Path
 from typing import Any
 
 SERVER_NAME = "fincrim-screening"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.2.0"
 SUPPORTED_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 TIERS = ("AUTO_CLEAR", "AUTO_ESCALATE", "BORDERLINE", "HUMAN_REVIEW")
 INSTRUCTIONS = (
     "Read-only tools over a deterministic sanctions-screening engine. The engine's decision, "
     "reason code, tier and evidence are final: report them exactly and never suggest a different "
     "decision. Quote hit, customer and evidence IDs from tool output only; if a fact is not in the "
-    "output, say it is not recorded rather than guessing."
+    "output, say it is not recorded rather than guessing. Two independent engines run (dual control): "
+    "the decision core decides and an independent rule check runs alongside; when screen_explain "
+    "returns a reviewer_action, always state it verbatim as the action for the human reviewer."
 )
 
 def find_repo() -> Path:
@@ -101,9 +104,108 @@ def _load(override: str | None):
     key = (str(path), _signature(path))
     if _CACHE.get("key") != key:
         ds = load_dataset(path)
+        decisions, core, checks = _run_dual(ds)
         _CACHE.clear()
-        _CACHE.update(key=key, ds=ds, decisions=run(ds), path=path, version=version)
+        _CACHE.update(key=key, ds=ds, decisions=decisions, core=core, checks=checks, path=path,
+                      version=version)
     return _CACHE
+
+
+# ------------------------------------------------------------------ dual control
+# The engine runs two independent engines (pipeline.py): the decision core decides, the modular
+# rule check runs alongside, and compiler.merge_with_core combines them. The merged decision keeps
+# the core's row as trace[0] but not the check's own verdict, so we record each check verdict as the
+# pipeline computes it (one pass, decisions identical to `screen run`).
+
+ENGINES_CONFLICT = "ENGINES_CONFLICT"
+ENGINES_DISAGREE = "ENGINES_DISAGREE"
+ESCALATED_BY_POLICY = "ESCALATED_BY_POLICY"
+_REVIEWER = re.compile(r"Reviewer:\s*(.+?)(?=\s+Core:\s|$)", re.S)
+
+# Head of Financial Crime policy calls (contrib/aml-bot/README.md), used when the engine has no
+# system/screening/policy.py with a POLICIES table. Paraphrased; the core engine implements them.
+BUILTIN_POLICIES = (
+    ("HOFC-1", "One shared name part", "Only one name part is shared with the verified legal name: clear only "
+     "when the given names are full and clearly differ; otherwise REVIEW ('Escalated, not cleared ... Reviewer: ...')."),
+    ("HOFC-2", "Patronymic surname", "A shared surname that is commonly a father's given name (e.g. Umar, Ahmed, "
+     "Ibrahim): REVIEW, because name order is unreliable."),
+    ("HOFC-3", "Former single states", "Countries that were one state (former Yugoslavia, USSR, Czechoslovakia, "
+     "Sudan/South Sudan, Ethiopia/Eritrea): REVIEW, not a location clearance."),
+    ("HOFC-4", "Business address only", "An individual hit whose only country is a business address: REVIEW."),
+    ("HOFC-5", "Several customers, all clear", "Several customers fit and all lead to clearance: clear with "
+     "customer AMBIGUOUS."),
+    ("HOFC-6", "Ages in news text", "Ages inside news-report paragraphs are ignored (safe direction)."),
+    ("HOFC-7", "Countries in notes", "All countries in customer notes count for the location rule."),
+    ("HOFC-8", "Possible name reorder", "A possible name reorder is left in REVIEW rather than tuned to a label."),
+)
+
+
+def _run_dual(ds):
+    from screening import pipeline
+
+    core: dict[str, dict[str, Any]] = {}
+    if pipeline.engine_mode() in ("combined", "core"):
+        from screening.core import core_results
+
+        core = core_results(ds)  # cached on ds, reused by pipeline.run
+    checks: dict[str, Any] = {}
+    original = pipeline.check_hit
+
+    def recording(ds_, hit_id):
+        d = original(ds_, hit_id)
+        checks[hit_id] = d
+        return d
+
+    pipeline.check_hit = recording
+    try:
+        decisions = pipeline.run(ds)
+    finally:
+        pipeline.check_hit = original
+    return decisions, core, checks
+
+
+def reviewer_action(*reasons: str | None) -> str | None:
+    """The human-in-the-loop instruction the engine wrote after 'Reviewer:', or None."""
+    for text in reasons:
+        m = _REVIEWER.search(text or "")
+        if m:
+            return m.group(1).strip()
+    return None
+
+
+def _agreement(core_dec: str | None, check_dec: str | None, flags) -> str:
+    if ENGINES_CONFLICT in flags:
+        return "CONFLICT"
+    if not core_dec or not check_dec:
+        return "UNAVAILABLE"
+    if core_dec == check_dec:
+        return "AGREE"
+    if core_dec == "DIFFERENT_ENTITY" and check_dec == "SAME_ENTITY":
+        return "CONFLICT"
+    return "DISAGREE"
+
+
+def _dual(c: dict[str, Any], d) -> dict[str, Any]:
+    """Core verdict, check verdict, agreement status and reviewer action for one merged decision."""
+    core = c["core"].get(d.hit_id)
+    check = c["checks"].get(d.hit_id)
+    core_v = None if not core else {
+        "decision": core.get("decision"), "reason_code": core.get("reason_code"),
+        "reason": core.get("reason") or "", "evidence": [str(e) for e in core.get("evidence") or () if e],
+        "customer_record_id": core.get("customer_record_id"),
+    }
+    check_v = None if check is None else {
+        "decision": check.decision.value, "reason_code": check.reason_code.value, "reason": check.reason,
+        "evidence": list(check.evidence), "customer_record_id": check.customer_record_id,
+        "flags": list(check.flags),
+    }
+    return {
+        "core_verdict": core_v,
+        "check_verdict": check_v,
+        "agreement": _agreement(core_v and core_v["decision"], check_v and check_v["decision"], d.flags),
+        "escalated_by_policy": ESCALATED_BY_POLICY in d.flags,
+        "reviewer_action": reviewer_action(d.reason, core_v["reason"] if core_v else None),
+    }
 
 
 # ------------------------------------------------------------------ tools
@@ -139,8 +241,70 @@ def screen_explain(args: dict[str, Any]) -> dict[str, Any]:
     c = _load(args.get("data"))
     for d in c["decisions"]:
         if d.hit_id.lower() == hit_id.lower():
-            return {"engine_version": c["version"], **d.full()}
+            return {"engine_version": c["version"], **d.full(), **_dual(c, d)}
     raise ToolError(f"unknown hit {hit_id}")
+
+
+def engine_diff(args: dict[str, Any]) -> dict[str, Any]:
+    """Dual control: counts by (core decision, check decision) pair and the hits where they differ."""
+    c = _load(args.get("data"))
+    want = str(args.get("agreement") or "").upper()
+    if want and want not in ("AGREE", "DISAGREE", "CONFLICT", "UNAVAILABLE"):
+        raise ToolError("agreement must be one of AGREE, DISAGREE, CONFLICT, UNAVAILABLE")
+    limit = _int(args.get("limit"), 50, 0, 1000)
+    pairs: Counter[str] = Counter()
+    status: Counter[str] = Counter()
+    rows = []
+    for d in c["decisions"]:
+        x = _dual(c, d)
+        core_dec = (x["core_verdict"] or {}).get("decision") or "NONE"
+        check_dec = (x["check_verdict"] or {}).get("decision") or "NONE"
+        pairs[f"{core_dec}/{check_dec}"] += 1
+        status[x["agreement"]] += 1
+        if (x["agreement"] == want) if want else (x["agreement"] != "AGREE"):
+            rows.append({"hit_id": d.hit_id, "core": core_dec, "check": check_dec,
+                         "final_decision": d.decision.value, "final_reason_code": d.reason_code.value,
+                         "tier": d.tier.value, "agreement": x["agreement"], "flags": list(d.flags),
+                         "reviewer_action": x["reviewer_action"]})
+    compared = sum(n for s, n in status.items() if s != "UNAVAILABLE")
+    return {
+        "engine_version": c["version"],
+        "hits": len(c["decisions"]),
+        "pairs": dict(sorted(pairs.items())),
+        "agreement": dict(sorted(status.items())),
+        "agreement_rate": round(status.get("AGREE", 0) / compared, 4) if compared else None,
+        "escalated_by_policy": sum(1 for d in c["decisions"] if ESCALATED_BY_POLICY in d.flags),
+        "listed": want or "not AGREE",
+        "total": len(rows),
+        "shown": min(limit, len(rows)),
+        "list": rows[:limit],
+    }
+
+
+def policy_list(args: dict[str, Any]) -> dict[str, Any]:
+    """Head of Financial Crime policy calls: system/screening/policy.py POLICIES if present, else built in."""
+    try:
+        from screening import policy as policy_mod  # type: ignore[attr-defined]
+
+        table = policy_mod.POLICIES
+    except (ImportError, AttributeError):
+        table = None
+    if table is not None:
+        items = list(table.items()) if isinstance(table, dict) else list(table)
+        policies = []
+        for i, p in enumerate(items, 1):
+            if isinstance(p, tuple) and len(p) == 2 and isinstance(p[0], str):  # dict item (id, value)
+                pid, val = p
+                p = {"id": pid, **val} if isinstance(val, dict) else {"id": pid, "text": val}
+            elif not isinstance(p, dict):
+                p = {"id": str(i), "text": p}
+            policies.append(json.loads(json.dumps(p, default=str)))
+        return {"source": "system/screening/policy.py", "count": len(policies), "policies": policies}
+    return {
+        "source": "built-in (contrib/aml-bot/README.md Head of Financial Crime policy calls)",
+        "count": len(BUILTIN_POLICIES),
+        "policies": [{"id": i, "title": t, "text": x} for i, t, x in BUILTIN_POLICIES],
+    }
 
 
 def review_queue(args: dict[str, Any]) -> dict[str, Any]:
@@ -223,9 +387,12 @@ TOOLS: dict[str, tuple[Any, dict[str, Any]]] = {
         "inputSchema": {"type": "object", "properties": {**DATA_PROP}},
     }),
     "screen_explain": (screen_explain, {
-        "description": "Full evidence trail for one screening hit: decision, reason code, customer "
-                       "record, reason text, evidence IDs, tier, weak-evidence flags and the rule trace "
-                       "(one line per SOP check with its signal and summary). Use this to answer 'why "
+        "description": "Full evidence trail for one screening hit: final decision, reason code, customer "
+                       "record, reason text, evidence IDs, tier, flags and the trace (trace[0] = the decision "
+                       "core, rule_id CORE.aml; the rest = the independent rule check, one line per facet). "
+                       "Also core_verdict and check_verdict (the two independent engines), agreement "
+                       "(AGREE / DISAGREE / CONFLICT / UNAVAILABLE), escalated_by_policy and reviewer_action "
+                       "(the 'Reviewer: ...' instruction for the human, or null). Use this to answer 'why "
                        "was H-xxx cleared/escalated?'.",
         "inputSchema": {"type": "object", "required": ["hit_id"],
                         "properties": {"hit_id": {"type": "string", "description": "Hit ID, e.g. H-0001"},
@@ -248,6 +415,23 @@ TOOLS: dict[str, tuple[Any, dict[str, Any]]] = {
             "limit": {"type": "integer", "minimum": 0, "maximum": 1000, "default": 25,
                       "description": "Max mismatching rows to return."},
             **DATA_PROP}},
+    }),
+    "engine_diff": (engine_diff, {
+        "description": "Dual control overview: how often the decision core and the independent rule check "
+                       "agree, counts by core/check decision pair, agreement rate, hits escalated by policy, "
+                       "and the list of hits where they differ (or those with the given agreement status). "
+                       "The core decides; CONFLICT = core cleared but the check confirms, so the hit goes to REVIEW.",
+        "inputSchema": {"type": "object", "properties": {
+            "agreement": {"type": "string", "enum": ["AGREE", "DISAGREE", "CONFLICT", "UNAVAILABLE"],
+                          "description": "List only hits with this status (default: every hit that is not AGREE)."},
+            "limit": {"type": "integer", "minimum": 0, "maximum": 1000, "default": 50},
+            **DATA_PROP}},
+    }),
+    "policy_list": (policy_list, {
+        "description": "The Head of Financial Crime policy calls the decision core applies (cautious "
+                       "'Escalated, not cleared' cases), from system/screening/policy.py when present, else the "
+                       "built-in list from contrib/aml-bot/README.md.",
+        "inputSchema": {"type": "object", "properties": {}},
     }),
     "screen_repro": (screen_repro, {
         "description": "Determinism proof: run the engine N times in fresh processes with different "

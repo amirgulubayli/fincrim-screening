@@ -1,6 +1,16 @@
 import { useEffect, useState } from "react";
-import { api, type CaseStatus, type RecordLookup, type Tier } from "./api";
-import { DECISION_LABEL, STATUS_LABEL, TIER_BY_ID } from "./labels";
+import { api, type Agreement, type CaseStatus, type RecordLookup, type Tier } from "./api";
+import { AGREEMENT_LABEL, DECISION_LABEL, STATUS_LABEL, TIER_BY_ID } from "./labels";
+
+/** AGREE / DISAGREE / CONFLICT between the decision core and the independent rule check. */
+export function AgreementBadge({ status, small = false }: { status: Agreement; small?: boolean }) {
+  const l = AGREEMENT_LABEL[status] ?? { short: status, long: status };
+  return (
+    <span className={`agree-badge ag-${status} ${small ? "sm" : ""}`} title={l.long}>
+      {small ? l.short : status === "UNAVAILABLE" ? "ONE ENGINE" : status}
+    </span>
+  );
+}
 
 export function fmt(v: unknown): string {
   if (v === null || v === undefined || v === "") return "—";

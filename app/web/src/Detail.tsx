@@ -1,7 +1,84 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, type Detail, type Person, type Rec, type TraceRow } from "./api";
-import { DECISION_LABEL, FACET_LABEL, humanFlag, reasonLabel, TIER_BY_ID, whyTier } from "./labels";
-import { Badge, EvidenceList, fmt, StatusPill, TierPill } from "./ui";
+import { api, type Detail, type EngineVerdict, type Person, type Rec, type TraceRow } from "./api";
+import { AGREEMENT_LABEL, DECISION_LABEL, FACET_LABEL, humanFlag, reasonLabel, TIER_BY_ID, whyTier } from "./labels";
+import { AgreementBadge, Badge, EvidenceList, fmt, StatusPill, TierPill } from "./ui";
+
+const CORE_RULE = "CORE.aml";
+
+/** The human-in-the-loop instruction the engine wrote ("Reviewer: ..."). */
+function ReviewerCallout({ text }: { text: string }) {
+  return (
+    <div className="reviewer-callout" role="note" aria-label="Reviewer action">
+      <div className="rc-head">Reviewer action</div>
+      <p>{text.charAt(0).toUpperCase() + text.slice(1)}</p>
+      <div className="small muted">Written by the decision core: what a person must check before closing this case.</div>
+    </div>
+  );
+}
+
+function VerdictHead({ v }: { v: EngineVerdict | null }) {
+  if (!v || !v.decision) return <span className="muted">no decision</span>;
+  return (
+    <div className="ev-verdict">
+      <Badge decision={v.decision} />
+      {v.reason_code && <span className="reason-code" title={v.reason_code}>{reasonLabel(v.reason_code)}</span>}
+    </div>
+  );
+}
+
+function stripReviewer(reason: string): string {
+  return reason.replace(/\s*Reviewer:[\s\S]*$/, "").trim();
+}
+
+/** Dual control: the decision core's verdict next to the independent rule check's facet results. */
+function EnginesPanel({ d }: { d: Detail }) {
+  const e = d.decision.engines;
+  if (!e) return null;
+  const checkRows = d.decision.trace.filter((t) => t.rule_id !== CORE_RULE);
+  const decisive = checkRows.filter((t) => t.signal !== "neutral");
+  return (
+    <div className="block engines">
+      <div className="engines-head">
+        <h3>Two independent engines</h3>
+        <AgreementBadge status={e.agreement} />
+        {e.escalated_by_policy && <span className="policy-tag" title={humanFlag("ESCALATED_BY_POLICY")}>escalated by policy</span>}
+        <span className="small muted grow-text">{AGREEMENT_LABEL[e.agreement]?.long}</span>
+      </div>
+      <div className="engines-grid">
+        <div className="engine-col core">
+          <div className="engine-title">Decision core <span className="muted small">· decides</span></div>
+          <VerdictHead v={e.core} />
+          {e.core ? (
+            <>
+              <p className="engine-reason">{stripReviewer(e.core.reason) || <span className="muted">no reason given</span>}</p>
+              <EvidenceList ids={e.core.evidence} empty="no record cited" />
+            </>
+          ) : <p className="muted small">The decision core gave no answer for this hit; the independent check decided and the hit was not cleared on it alone.</p>}
+        </div>
+        <div className="engine-col check">
+          <div className="engine-title">Independent check <span className="muted small">· facet by facet</span></div>
+          <VerdictHead v={e.check} />
+          {e.check ? (
+            <ul className="facet-list">
+              {(decisive.length ? decisive : checkRows).map((t, i) => (
+                <li key={i} className={`sig-${t.signal}`}>
+                  <span className={`sig sig-${t.signal}`}>{t.signal}</span>
+                  <span className="strong">{FACET_LABEL[t.facet] ?? t.facet}</span>
+                  {t.weak && <span className="weak-tag" title={humanFlag(t.weak_why ?? "")}>weak</span>}
+                  <div className="small">{t.summary}</div>
+                </li>
+              ))}
+              {!checkRows.length && <li className="muted small">No facet rule spoke — the check found nothing decisive.</li>}
+              {decisive.length > 0 && decisive.length < checkRows.length && (
+                <li className="muted small">+{checkRows.length - decisive.length} neutral facet result(s) in the rule trace below.</li>
+              )}
+            </ul>
+          ) : <p className="muted small">The independent check did not run in this engine mode.</p>}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 type Line = { v: string; src?: string; note?: string };
 
@@ -232,8 +309,12 @@ function Timeline({ d }: { d: Detail }) {
       <li className="tl sig-final">
         <span className="tl-dot" aria-hidden />
         <div className="tl-head">
-          <span className="strong">Compiler</span>
-          <span className="muted">fixed precedence: contradiction → agreement → review</span>
+          <span className="strong">{dec.engines ? "Dual-control merge" : "Compiler"}</span>
+          <span className="muted">
+            {dec.engines
+              ? "the core decides · core clears but check confirms → review · other disagreement → 4-eyes"
+              : "fixed precedence: contradiction → agreement → review"}
+          </span>
         </div>
         <div className="tl-body">
           <Badge decision={dec.decision} /> {dec.reason_code} → <TierPill tier={dec.tier} long />
@@ -401,6 +482,7 @@ export default function DetailPane({ id, onReviewed }: { id: string | null; onRe
           <span className="muted small">· customer <span className="mono">{dec.customer_record_id ?? "none resolved"}</span></span>
         </div>
         <p className="reason">{dec.reason}</p>
+        {dec.engines?.reviewer_action && <ReviewerCallout text={dec.engines.reviewer_action} />}
         <div className="dc-row">
           <span className="k">Deciding evidence</span>
           <EvidenceList ids={dec.evidence} empty="no record cited (nothing decisive)" />
@@ -412,6 +494,8 @@ export default function DetailPane({ id, onReviewed }: { id: string | null; onRe
           </div>
         )}
       </div>
+
+      <EnginesPanel d={d} />
 
       <ActionPanel d={d} onDone={() => { load(); onReviewed(); }} />
 
@@ -440,7 +524,7 @@ export default function DetailPane({ id, onReviewed }: { id: string | null; onRe
       </div>
 
       <div className="block">
-        <h3>Rule trace</h3>
+        <h3>Rule trace <span className="muted small">— {CORE_RULE} is the decision core; the rest is the independent check</span></h3>
         <Timeline d={d} />
       </div>
 
