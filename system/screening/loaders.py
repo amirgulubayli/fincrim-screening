@@ -39,17 +39,30 @@ FILES = {
 REQUIRED = ("alerts", "hits")
 
 
+LOAD_WARNINGS: list[str] = []
+
+
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    """Tolerant reader: BOM, bad JSON and non-object lines are skipped with a warning.
+
+    Crashing here would leave every hit unanswered; a skipped line only removes facts,
+    and missing facts never clear (the decision core reads the folder independently).
+    """
     rows: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as fh:
+    with path.open("r", encoding="utf-8-sig", errors="replace") as fh:
         for line_no, line in enumerate(fh, 1):
             line = line.strip()
             if not line:
                 continue
             try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError as exc:  # keep going; report clearly
-                raise ValueError(f"{path.name}:{line_no}: bad JSON ({exc})") from exc
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                LOAD_WARNINGS.append(f"{path.name}:{line_no}: bad JSON line skipped")
+                continue
+            if not isinstance(row, dict):
+                LOAD_WARNINGS.append(f"{path.name}:{line_no}: non-object line skipped")
+                continue
+            rows.append(row)
     return rows
 
 

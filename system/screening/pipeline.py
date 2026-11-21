@@ -18,12 +18,14 @@ SCREEN_ENGINE=check|core|combined (default combined) selects the engine, e.g. fo
 from __future__ import annotations
 
 import os
+import re
 
 from .compiler import Verdict, combine_persons, compile_person, merge_with_core
-from .contracts import Decision, HitDecision, ReasonCode, RuleResult, Tier
+from .contracts import Decision, Facet, HitDecision, ReasonCode, RuleResult, Signal, Tier
 from .explain import evidence_ids, reason_text
 from .facts import gather_hit_facts
 from .loaders import Dataset
+from .normalize.dates import parse_date
 from .resolve import resolve_customer
 from .rules import RULES, Context
 from .triage import assign_tier, flags_for
@@ -58,6 +60,7 @@ def check_hit(ds: Dataset, hit_id: str) -> HitDecision:
             )
         )
     verdict = combine_persons(verdicts)
+    verdict = _guard_location_clear(verdict, hit, alert, resolution.persons, trace)
     flags = flags_for(verdict, resolution_method=resolution.method)
     return HitDecision(
         hit_id=hit.hit_id,
@@ -71,6 +74,49 @@ def check_hit(ds: Dataset, hit_id: str) -> HitDecision:
         flags=flags,
         trace=tuple(trace),
     )
+
+
+_DOB_KEY = re.compile(r"dob|date.?of.?birth|birth.?date", re.I)
+
+
+def _date_unusable(hit, alert, persons) -> str | None:
+    """Why a date that could tie the hit to the customer is present but unusable, else None.
+
+    Covers unreadable formats (2-digit years, free text), DOBs under a field name the
+    loader does not map (left in `extra`), and a screening date too imprecise to turn
+    an age into a birth year.
+    """
+    if any(parse_date(v) is None for v in hit.dobs):
+        return "hit DOB unreadable"
+    records = [r for p in persons or () for r in p.records]
+    for rec in (hit, alert, *records):
+        if any(_DOB_KEY.search(k) and v not in (None, "", [], ()) for k, v in rec.extra.items()):
+            return "DOB under an unmapped field name"
+    raws = [alert.dob, *(r.dob for r in records), *(k.verified_dob for p in persons or () for k in p.kyc)]
+    if any(r and parse_date(r) is None for r in raws):
+        return "customer DOB unreadable"
+    when = parse_date(alert.screened_at) if alert.screened_at else None
+    if alert.screened_at and (when is None or not when.day):
+        return "screening date imprecise"
+    return None
+
+
+def _guard_location_clear(verdict, hit, alert, persons, trace) -> Verdict:
+    """SOP P6 fail-safe: a country difference clears only if the DOBs could be compared.
+
+    The location rule's birth-year safety net needs readable dates; when the names agree
+    and a date is present but unusable, the clear becomes REVIEW (never clear on doubt).
+    """
+    if verdict.decision is not Decision.DIFFERENT_ENTITY or verdict.reason_code is not ReasonCode.LOCATION_MISMATCH:
+        return verdict
+    if not any(r.facet is Facet.NAME and r.signal is Signal.AGREEMENT for r in trace):
+        return verdict
+    why = _date_unusable(hit, alert, persons)
+    if why is None:
+        return verdict
+    return Verdict(Decision.REVIEW, ReasonCode.INSUFFICIENT_DATA, verdict.used, verdict.customer_record_id,
+                   (*verdict.notes, f"The names agree and the countries differ, but a date could not be "
+                    f"compared ({why}); a country difference alone does not clear this hit."))
 
 
 def adjudicate(ds: Dataset, hit_id: str, mode: str | None = None) -> HitDecision:
