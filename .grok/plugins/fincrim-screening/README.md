@@ -30,9 +30,9 @@ No tool can change a decision, write to the data folder or edit code.
 |---|---|---|
 | `screen_summary` | `data?` | counts of alerts, hits, customers, accounts, KYC checks, notes, search results, labels |
 | `screen_run` | `data?` | counts by decision, HITL tier, decision x tier, reason code, flag |
-| `screen_explain` | `hit_id`, `data?` | decision, reason code, customer record, reason, evidence IDs, tier, flags, full trace (`trace[0]` = decision core `CORE.aml`), plus `core_verdict`, `check_verdict`, `agreement` (AGREE / DISAGREE / CONFLICT / UNAVAILABLE), `escalated_by_policy`, `reviewer_action` |
+| `screen_explain` | `hit_id`, `data?` | decision, reason code, customer record, reason, evidence IDs, tier, flags, full trace (`trace[0]` = decision core `CORE.aml`), plus `core_verdict`, `check_verdict`, `agreement` (AGREE / DISAGREE / CONFLICT / UNAVAILABLE), `escalated_by_policy`, `reviewer_action`, `policies` (ids from `policies_for`) |
 | `engine_diff` | `agreement?`, `limit?` (50), `data?` | dual control: counts by core/check decision pair, agreement counts and rate, hits escalated by policy, list of hits that differ |
-| `policy_list` | - | Head of Financial Crime policy calls: `system/screening/policy.py` `POLICIES` if present, else a built-in list from `contrib/aml-bot/README.md` |
+| `policy_list` | `kind?` (sop / hofc / dual_control) | policy registry from `system/screening/policy.py` (`registry()`, else `POLICIES`); built-in HoFC list from `contrib/aml-bot/README.md` if the module is missing |
 | `review_queue` | `tier?` (HUMAN_REVIEW), `limit?` (20), `data?` | hits in that tier, sorted by ID |
 | `screen_eval` | `limit?` (25), `data?` | practice-label score: decision score, accuracy, review rate, **unsafe clearances + hit IDs**, mismatches |
 | `screen_repro` | `runs?` (5), `data?` | N fresh-process runs with different PYTHONHASHSEED: sha256 each, `byte_identical`, unstable hits |

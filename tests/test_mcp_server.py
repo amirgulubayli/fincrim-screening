@@ -121,7 +121,15 @@ def test_dual_control_tools():
     # policy_list: system/screening/policy.py if it exists, else the built-in HoFC calls
     assert policies["count"] == len(policies["policies"]) > 0
     assert all("id" in p for p in policies["policies"])
+    assert any(p["id"].startswith("HOFC-") for p in policies["policies"])
+    assert explain["policies"] is None or isinstance(explain["policies"], list)
     assert replies[4]["result"]["isError"] is True
+
+
+def test_policy_list_kind_filter():
+    replies = _session([_req(1, "tools/call", {"name": "policy_list", "arguments": {"kind": "hofc"}})])
+    out = replies[0]["result"]["structuredContent"]
+    assert out["count"] > 0 and all(p["kind"] == "hofc" for p in out["policies"])
 
 
 def test_reviewer_action_and_agreement():

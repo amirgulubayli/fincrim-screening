@@ -241,7 +241,7 @@ def screen_explain(args: dict[str, Any]) -> dict[str, Any]:
     c = _load(args.get("data"))
     for d in c["decisions"]:
         if d.hit_id.lower() == hit_id.lower():
-            return {"engine_version": c["version"], **d.full(), **_dual(c, d)}
+            return {"engine_version": c["version"], **d.full(), **_dual(c, d), "policies": _policies_for(d)}
     raise ToolError(f"unknown hit {hit_id}")
 
 
@@ -282,11 +282,16 @@ def engine_diff(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def policy_list(args: dict[str, Any]) -> dict[str, Any]:
-    """Head of Financial Crime policy calls: system/screening/policy.py POLICIES if present, else built in."""
+    """Policy registry from system/screening/policy.py (registry() / POLICIES), else the built-in HoFC calls."""
+    kind = str(args.get("kind") or "").strip().lower()
+    table = None
     try:
         from screening import policy as policy_mod  # type: ignore[attr-defined]
 
-        table = policy_mod.POLICIES
+        if callable(getattr(policy_mod, "registry", None)):
+            table = policy_mod.registry()
+        else:
+            table = policy_mod.POLICIES
     except (ImportError, AttributeError):
         table = None
     if table is not None:
@@ -299,12 +304,26 @@ def policy_list(args: dict[str, Any]) -> dict[str, Any]:
             elif not isinstance(p, dict):
                 p = {"id": str(i), "text": p}
             policies.append(json.loads(json.dumps(p, default=str)))
+        if kind:
+            policies = [p for p in policies if str(p.get("kind", "")).lower() == kind]
         return {"source": "system/screening/policy.py", "count": len(policies), "policies": policies}
+    builtin = [{"id": i, "kind": "hofc", "title": t, "effect": x} for i, t, x in BUILTIN_POLICIES]
+    if kind:
+        builtin = [p for p in builtin if p["kind"] == kind]
     return {
         "source": "built-in (contrib/aml-bot/README.md Head of Financial Crime policy calls)",
-        "count": len(BUILTIN_POLICIES),
-        "policies": [{"id": i, "title": t, "text": x} for i, t, x in BUILTIN_POLICIES],
+        "count": len(builtin),
+        "policies": builtin,
     }
+
+
+def _policies_for(d) -> list[str] | None:
+    """Policy ids that apply to one decision, when the engine has screening.policy.policies_for."""
+    try:
+        from screening.policy import policies_for  # type: ignore[attr-defined]
+    except ImportError:
+        return None
+    return list(policies_for(d))
 
 
 def review_queue(args: dict[str, Any]) -> dict[str, Any]:
@@ -428,10 +447,13 @@ TOOLS: dict[str, tuple[Any, dict[str, Any]]] = {
             **DATA_PROP}},
     }),
     "policy_list": (policy_list, {
-        "description": "The Head of Financial Crime policy calls the decision core applies (cautious "
-                       "'Escalated, not cleared' cases), from system/screening/policy.py when present, else the "
-                       "built-in list from contrib/aml-bot/README.md.",
-        "inputSchema": {"type": "object", "properties": {}},
+        "description": "The policy registry the decisions rest on: SOP principles (P1..P9), Head of Financial "
+                       "Crime calls (HOFC-*, the core's cautious 'Escalated, not cleared' cases) and dual-control "
+                       "merge rules (DC-*), from system/screening/policy.py; falls back to a built-in HoFC list "
+                       "from contrib/aml-bot/README.md if that module is missing.",
+        "inputSchema": {"type": "object", "properties": {
+            "kind": {"type": "string", "enum": ["sop", "hofc", "dual_control"],
+                     "description": "Only policies of this kind (default: all)."}}},
     }),
     "screen_repro": (screen_repro, {
         "description": "Determinism proof: run the engine N times in fresh processes with different "

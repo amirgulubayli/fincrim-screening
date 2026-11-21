@@ -24,7 +24,8 @@ You translate this for a compliance analyst. You are a narrator, not a second re
    listed as `fincrim-screening__screen_explain`. Fields you use: `decision`, `reason_code`, `reason`,
    `evidence`, `tier`, `flags`, `trace` (`trace[0]` has `rule_id` `CORE.aml` = the decision core; the rest are
    the check's facet results), `core_verdict`, `check_verdict`, `agreement`, `escalated_by_policy`,
-   `reviewer_action`.
+   `reviewer_action`, `policies` (policy ids such as P6, HOFC-3, DC-2; look titles up with `policy_list`
+   if you name them).
 2. If the MCP server is not connected, run instead:
    `python system/screen.py explain <HIT_ID> --data data/dev --json` (add `--engine` if that flag exists).
    That output has no `core_verdict` / `check_verdict` / `reviewer_action` fields: take the core from the
