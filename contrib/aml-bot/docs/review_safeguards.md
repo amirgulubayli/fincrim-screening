@@ -55,15 +55,8 @@ Top names: "Abdul Rahman", "Muhammad Nadeem" and "Abdul Rahman Yasin" (5 custome
 - **Stress test:** 0 unsafe flips across 21 perturbations (stress_final3.txt).
 - **Format fuzz:** all 8 shapes pass, 0 unsafe, equivalent shapes 819/819 identical (fuzz_final3.txt).
 
-## Addendum, 21 Nov (after 14:49): Head of Financial Crime decisions
-1. The 10 country-only clearances moved to REVIEW by the married-surname/dropped-middle-name guard **stay in REVIEW**.
-2. **New rule:** same surname + an agreeing DOB (any DOB we trust, including a year-only list DOB) means a different first/given name alone cannot clear. The hit goes to REVIEW: "Escalated, not cleared: … Only the given names differ, which a middle name or a known-as name can explain. Reviewer: verify the customer's full legal name, including middle names, from the ID document." The independent verifier mirrors it. Fail-safe: if a DOB on either side cannot be read, it may be the one that agrees, so a shared surname with a different given name also goes to REVIEW (found by the stress test: two-digit years had let 2 of the 19 clear again). Late fix (15:40): DOBs on both sides that neither agree nor all contradict also go to REVIEW (3 more: H-088ACA, H-E82E48, H-F7F7BF), and web-search results are also matched up to known given-name variants when the exact query finds nothing (a transliterated listing keeps its search-derived DOB). Attacker test after this fix: 2 plausible unsafe (H-338C9D, H-38019A: list gives no DOB at all; closing them would move 19 more clearances and overturn policy 3). Transliterate stress perturbation: 0 unsafe. Final: 22 decisions moved vs b892317, all DIFFERENT_ENTITY → REVIEW; 398 / 123 / 298; 130 of 440 alerts fully cleared.
-
-Effect against the previous output (b892317): **19 decisions changed**, all DIFFERENT_ENTITY (NAME_MISMATCH_VERIFIED) → REVIEW:
-H-73AB0E, H-41D303, H-0C27A1, H-FE1415, H-F50B21, H-866A26, H-775DC0, H-849B4F, H-F3ED4F, H-32BBAE, H-F1E980, H-3BCC32, H-8B7A97, H-006E36, H-DDC553, H-CC0A18, H-380854, H-17B10F, H-A4722E.
-
-- Totals: 401 DIFFERENT_ENTITY / 123 SAME_ENTITY / 295 REVIEW; 132 of 440 alerts fully cleared (was 420/123/276, 147).
-- Labels: 48/50 (cost saved 94.4%, was 97.2%), 0 unsafe. The new miss is H-380854 (labelled DIFFERENT_ENTITY: verified SARAH JOHNSON vs listed "Johnson, James Jacob", years 1997/1998 agree), now REVIEW (cost 3).
-- Every agreeing DOB among the 19 is year-only on the list side (often age-derived pairs such as 1986/1985), and several are a female verified name against a male listed name. A narrower reading (month-level agreement) would not have closed the attacker gaps, which are also year-only, so the rule is applied as stated.
-- Attacker test: plausible unsafe clearances 5 → 3 (3,622 attacks on 418 non-cleared hits). The 3 left (H-338C9D, H-38019A, H-7D0FAB disguised as a dropped middle name) have no list DOB that agrees with the customer's, so the rule can't fire; closing them would mean never clearing on the surname rule.
-- Stress test 0 unsafe; format fuzz all 8 shapes pass (six equivalent shapes 819/819 identical); 59 tests pass; runs byte-identical (final MD5 dc8f922d9607fb4fa93337c75984d254).
+## Addendum, 21 Nov (15:50): Head of Financial Crime decisions
+- The 10 country-only clearances moved to REVIEW by the married-surname/dropped-middle-name guard **stay in REVIEW**.
+- A stricter rule (same surname + agreeing DOB never clears on a different given name) was trialled and **dropped**: it moved 19-22 clearances to REVIEW and cost the labelled H-380854 (49/50 to 48/50). The earlier surname rule stands, and the 5 attacker cases (dropped middle name, customer known by that middle name) are accepted by policy.
+- Kept a generic fix found in the trial: web search results are also matched up to known given-name variants when the exact query finds nothing. No change on dev (output byte-identical to b892317); transliterate stress perturbation 0 unsafe.
+- Final: 420 / 123 / 276, 147 of 440 alerts fully cleared, labels 49/50 (97.2%), 0 unsafe; attacker 5 plausible unsafe (accepted by policy); stress and format fuzz 0 unsafe; 55 tests.

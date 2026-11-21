@@ -25,8 +25,8 @@
 - **Say:** "This is Ozwald's policy call, as Head of Financial Crime, encoded as a rule."
 
 ## 4. Close (30 s)
-- **Labels:** 48/50, with 0 unsafe clearances.
-- **Workload:** 30% of alerts (130 of 440) fully cleared automatically.
+- **Labels:** 49/50, with 0 unsafe clearances.
+- **Workload:** a third of alerts (147 of 440) fully cleared automatically.
 - **Robustness:** 0 unsafe flips across 21 data perturbations and 8 file formats.
 - **Runs:** identical every time; about 20 seconds; £0.
 

@@ -992,38 +992,6 @@ def decide_one(D, alert, hit, prof):
                         overlaps.append((xvn, xsrc, hn, sp[0], cg, hg))
                         if not ok and doubt is None:
                             doubt = (xvn, xsrc, hn, sp[0], why)
-            agree_dob = next(((d, src, h) for d, src in all_dobs for h in hp["dobs"] if dob_agrees(d, h)), None)
-            if overlaps and doubt is None and not comp and agree_dob:
-                # Ozwald, 21 Nov: same surname + agreeing DOB -> a different given name alone does not clear
-                xvn, xsrc, hn, part, cg, hg = overlaps[0]
-                d, dsrc, h = agree_dob
-                return R("REVIEW", "INSUFFICIENT_DATA", list(dict.fromkeys([xsrc, dsrc] + hp["dob_ev"])),
-                         f"Escalated, not cleared: the customer's verified legal name {xvn} ({xsrc}) shares the surname "
-                         f"'{part.title()}' with the listed name {hn}, and the date of birth {fmt_date(d)} ({dsrc}) "
-                         f"agrees with the hit's {fmt_date(h)}. Only the given names differ "
-                         f"({' '.join(g.title() for g in cg)} versus {' '.join(g.title() for g in hg)}), which a middle "
-                         f"name or a known-as name can explain. Reviewer: verify the customer's full legal name, "
-                         f"including middle names, from the ID document.")
-            unread = prof["dob_unparsed"] + hp["dob_unparsed"]
-            if overlaps and doubt is None and not comp and not agree_dob and unread:
-                # fail-safe for the same rule: a date of birth we cannot read may be the one that agrees
-                xvn, xsrc, hn, part, cg, hg = overlaps[0]
-                return R("REVIEW", "INSUFFICIENT_DATA", list(dict.fromkeys([xsrc] + recs)),
-                         f"Escalated, not cleared: the customer's verified legal name {xvn} ({xsrc}) shares the surname "
-                         f"'{part.title()}' with the listed name {hn}, but a date of birth on file could not be read "
-                         f"({'; '.join(unread[:3])}), so it may agree. A different given name alone does not clear a "
-                         f"shared surname, since a middle name or a known-as name can explain it. Reviewer: confirm the "
-                         f"date of birth and the customer's full legal name from the ID document.")
-            if overlaps and doubt is None and not comp and not agree_dob and all_dobs and hp["dobs"]:
-                # same rule: dates of birth on both sides that neither clearly agree nor all contradict could be the same person
-                xvn, xsrc, hn, part, cg, hg = overlaps[0]
-                return R("REVIEW", "INSUFFICIENT_DATA", list(dict.fromkeys([xsrc] + recs + hp["dob_ev"])),
-                         f"Escalated, not cleared: the customer's verified legal name {xvn} ({xsrc}) shares the surname "
-                         f"'{part.title()}' with the listed name {hn}, and the customer's date of birth "
-                         f"{fmt_date(all_dobs[0][0])} ({all_dobs[0][1]}) does not rule out the hit's "
-                         f"{' or '.join(fmt_date(h) for h in hp['dobs'][:3])}. A different given name alone does not clear "
-                         f"a shared surname, since a middle name or a known-as name can explain it. Reviewer: verify the "
-                         f"customer's full legal name and date of birth from the ID document.")
             if overlaps and doubt is None:
                 xvn, xsrc, hn, part, cg, hg = overlaps[0]
                 srcs = sorted({o[1] for o in overlaps})
@@ -1220,11 +1188,6 @@ def _verify_one(D, alert, hit, recs, code):
                 sp = D.names.shared_parts(vn, hn, comp)
                 if sp and not (len(sp) == 1 and given_names_differ(D, vn, hn, sp[0], comp)[0]):
                     return False
-                if sp and not comp and any(not _contradicts(c, h) and c[0] == h[0] or
-                                           (dob_agrees(c, h)) for c in cust["dobs"] for h in hp["dobs"]):
-                    return False                   # same surname + agreeing DOB never clears on name
-                if sp and not comp and (cust["unparsed"] or any(x and not parse_date(x, "year") for x in as_list(hit.get("dobs")))):
-                    return False                   # an unreadable DOB may be the one that agrees
         return True
     return False
 

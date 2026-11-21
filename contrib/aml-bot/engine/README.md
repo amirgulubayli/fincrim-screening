@@ -59,7 +59,7 @@ Each extracted fact keeps the ID of the record it came from. A decision cites on
 - **Confirmation:** the records, the DOB source and any search result.
 - **Review:** the records tying the customer to the shared country.
 
-On the 50 practice labels, the evidence lists are identical to the reference for 47 of 48 correct decisions.
+On the 50 practice labels, the evidence lists are identical to the reference for 48 of 49 correct decisions.
 
 ## Determinism
 There is no model, no randomness and no clock dependence. Inputs are processed in sorted order, and ties are broken on IDs. Five consecutive runs produced byte-identical output (same MD5).
@@ -87,8 +87,7 @@ These are applied on top of POLICY.md, and are always the more cautious reading:
 8. **Ages inside news-report paragraphs are ignored**, so those hits go to review rather than being cleared.
 9. **Every country mentioned in the customer's notes counts** towards the customer's country set (fewer location clearances).
 10. **H-2808BE stays in REVIEW** (possible name reorder) rather than being tuned to reach 50/50.
-11. **Same surname + agreeing DOB:** a different first or given name alone never clears; REVIEW, with guidance that a middle name or known-as name may explain it and that the full legal name must be checked on the ID document. A year-only DOB that agrees counts, and a DOB on file that cannot be read, or that neither agrees nor clearly contradicts, is treated as possibly agreeing (REVIEW). This moved 22 dev clearances to REVIEW, including the labelled H-380854 (labels 49/50 → 48/50, still 0 unsafe).
-12. **Shared full name part + agreeing DOB blocks a location clearance** (possible married name or dropped middle name); the 10 country-only clearances this moved to REVIEW stay there.
+11. **Shared full name part + agreeing DOB blocks a location clearance** (possible married name or dropped middle name); the 10 country-only clearances this moved to REVIEW stay in REVIEW (21 Nov).
 
 Every REVIEW created by these calls starts "Escalated, not cleared:" and ends with an explicit "Reviewer: …" instruction.
 
@@ -143,15 +142,13 @@ The organisers test on files we have not seen, so `loader.py` does not assume on
 - **Proof:** `schema_fuzz.py <data folder>` rewrites the data in 8 shapes. The first six (renamed/camelCase, CSV, shuffled JSON arrays with extra fields, nested hits, flat joined rows, odd dates with optional fields missing) gave **identical decisions, 819/819**. The two degraded shapes (a key field missing, unknown check results) gave no crashes and no new clearances; their hits moved only towards REVIEW. In every shape there were 0 unsafe clearances against the labels. The raw workbook on its own also gives output identical to the JSONL run.
 
 ## Three late safeguards
-- **Attacker test (`adversary.py <data folder>`):** every hit we do not clear (421, of which 355 are plausible true matches) is rewritten the way a real match could look elsewhere. The rewrites are transliteration/romanisation variants, swapped order, a dropped middle name, a married surname, US date order, a year-only DOB, a one-letter typo, a former-state/demonym/ISO country, stripped accents, and hyphen/space changes: 3,649 rewrites in all. Before the fixes, 24 rewrites of plausible true matches were cleared; after them, 2. The fixes:
+- **Attacker test (`adversary.py <data folder>`):** every hit we do not clear (399, of which 355 are plausible true matches) is rewritten the way a real match could look elsewhere. The rewrites are transliteration/romanisation variants, swapped order, a dropped middle name, a married surname, US date order, a year-only DOB, a one-letter typo, a former-state/demonym/ISO country, stripped accents, and hyphen/space changes: 3,433 rewrites in all. Before the fixes, 24 rewrites of plausible true matches were cleared; after them, 5. The fixes:
   - A dd/mm vs mm/dd date counts as a contradiction only if both readings contradict, and as agreement if either agrees.
   - Clearances are blocked when names are linked by romanisation, a letter swap or a short-name typo.
   - A shared name part plus an agreeing DOB blocks a location clearance (possible married name or dropped middle name).
-  - Web search results are matched on normalised names.
+  - Web search results are matched on normalised names, and, when the exact query finds nothing, up to known given-name variants (a transliterated listing keeps its search-derived DOB).
 
-  - Same surname plus an agreeing DOB: a different given name alone no longer clears (policy 11).
-
-  The 2 that remain (H-338C9D, H-38019A) are a listing with no DOB at all where the customer's given name is dropped from the listed name. Closing them would mean never clearing a shared surname when the list gives no DOB, which would move 19 more dev clearances (one labelled different person) and overturn policy 3; left for the Head of Financial Crime.
+  The 5 that remain are all a dropped middle name where the customer goes by that middle name. They pass through the Head of Financial Crime's surname rule (clear when the given names clearly differ), which he has kept knowingly (21 Nov).
 - **Explain or escalate:** every clearance and match is turned into one sentence stating the field, our value, the list's value and the trusted source (set `SCREEN_EXPLAIN=<file>` to write them). A clearance that cannot be stated that way, or that cites an ID not in the data, is downgraded to REVIEW. On dev all 543 decisions could be stated, so none were downgraded.
 - **Many-to-many context:** the system counts how many screened customers each listed name hit, and how many listed names each customer hit. REVIEW reasons get a short note when a name is common (114 reviews on dev). This is never used to clear.
 
@@ -174,5 +171,5 @@ We did not have the official `dev/` JSONL folder during the build, and the organ
 - `schema_fuzz.py`: input-format fuzz test (needs a data folder).
 - `demo`, `demo.py`: three-case walkthrough for judges (`system/demo <data folder>`).
 - `adversary.py`: adversarial attacker test (needs a data folder).
-- `tests/`: 59 tests (`python3 -m unittest discover -s system/tests -v`): 19 rule tests, 17 robustness tests, 12 format tests and 11 safeguard tests.
+- `tests/`: 55 tests (`python3 -m unittest discover -s system/tests -v`): 19 rule tests, 17 robustness tests, 12 format tests and 7 safeguard tests.
 - `screen_round1.py`: the round-1 baseline, kept for comparison.

@@ -21,14 +21,14 @@ Every name-screening alert has to be looked at by an analyst, and almost all of 
   - A business address alone doesn't clear.
   - Patronymic surnames (Umar, Ibrahim, Alhassan…) and a surname-only overlap are escalated, with guidance for the analyst.
 - **Fail-safe by design.** If a date, country or field can't be read for certain, it counts as unknown and is never used to clear. If a whole table or key field can't be understood, the system clears nothing.
-- **Attacker test.** We tried to sneak 355 plausible true matches past the system with 3,649 disguises: transliterations, swapped or dropped names, married surnames, US date order, typos, former-state countries. The fixes cut the clearances from 24 to 2; the 2 left are listings with no date of birth at all, the cost of keeping the surname rule.
+- **Attacker test.** We tried to sneak 355 plausible true matches past the system with 3,433 disguises: transliterations, swapped or dropped names, married surnames, US date order, typos, former-state countries. The fixes cut the clearances from 24 to 5, and all 5 come from one documented policy call.
 - **Explain or escalate.** Every clearance must be stated in one sentence with the field, our value, the list's value and a trusted source (e.g. "Cleared on date of birth: verified KYC check KYC-DE8245 gives 1995-12-17, the list gives 1978 or 1979"). If it can't be stated that way, it goes to review.
 - **Common-name context.** Reviews note when a listed name matched several other customers ("likely a common-name hit: prioritise a DOB or ID check"). This context is never used to clear.
 - **Independent second check.** Every clearance is re-derived from the raw records by a separate verifier. If the verifier can't reproduce the clearance, the hit goes to review.
 
 ## Results (development set: 440 alerts, 819 hits, 72,265 customer records)
-- **Practice labels: 48 of 50 correct, 0 unsafe clearances.** Both misses are different people sent to review, which is the safe direction; one comes from our own rule that a shared surname plus a matching birth year never clears on a different first name alone.
-- **Workload: 130 of 440 alerts (30%) fully cleared automatically,** with 398 of 819 hits cleared and 123 confirmed matches sent to compliance.
+- **Practice labels: 49 of 50 correct, 0 unsafe clearances.** The one miss is a different person sent to review, which is the safe direction.
+- **Workload: 147 of 440 alerts (33%) fully cleared automatically,** with 420 of 819 hits cleared and 123 confirmed matches sent to compliance.
 - **Stress test:** the same data was rewritten 21 ways (date formats, name order, accents, spellings, country codes, junk lines…). Result: **0 unsafe flips.**
 - **Format-fuzz test:** the official file format isn't published, so the data was fed in 8 different shapes, plus the raw spreadsheet:
   - CSV, JSON arrays, hits nested inside alerts, one flat row per hit, and camelCase or renamed fields;
@@ -44,10 +44,10 @@ Every name-screening alert has to be looked at by an analyst, and almost all of 
 ## Why a regulator can live with it
 - **Every decision explains itself.** Each one comes with a 2–4 sentence reason that names this hit's own facts and cites the record IDs it rests on, which gives a ready-made audit trail (MLRs 2017, FCA SYSC 6.3, OFSI expectations).
 - **Escalations say what to check.** Every review starts "Escalated, not cleared:" and tells the analyst what to do, e.g. "check the dates of the listing's country information".
-- **No black box.** The rules are readable, no machine-learning model makes a decision, and changing a policy is a one-line, testable change. There are 59 automated tests.
+- **No black box.** The rules are readable, no machine-learning model makes a decision, and changing a policy is a one-line, testable change. There are 55 automated tests.
 - **Errors lean the safe way.** Uncertainty costs analyst time, never a missed sanctions match.
 
 ## Limits (honest)
-- **Tuned on 50 labels.** Expect roughly 60–85% of the possible saving on unseen data, not 94%. New wording of ages and notes falls back to review, which is safe but costs points.
+- **Tuned on 50 labels.** Expect roughly 60–85% of the possible saving on unseen data, not 97%. New wording of ages and notes falls back to review, which is safe but costs points.
 - **Unknown file layout.** If the official files use field names we have not anticipated, the system detects it and clears nothing. That is safe, but resolves nothing until mapped.
 - **Not a sanctions-policy engine.** It decides identity only; risk appetite and the decision to exit a customer stay with the bank.

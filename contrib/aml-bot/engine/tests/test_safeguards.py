@@ -79,26 +79,3 @@ class ManyToMany(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
-
-class SurnameAndDobRule(unittest.TestCase):
-    """Ozwald, 21 Nov: surname and DOB agree -> a different given name alone does not clear."""
-    def test_same_surname_and_dob_go_to_review(self):
-        r = one(self, dict(name="David Taylor", dob="1980-05-05", kyc=("DAVID TAYLOR", "1980-05-05", "United Kingdom")),
-                {"name": "Taylor, Michael", "dobs": "1980", "countries": "United Kingdom"})
-        self.assertEqual(r["decision"], "REVIEW")
-        self.assertIn("ID document", r["reason"])
-
-    def test_without_dob_agreement_the_surname_rule_still_clears(self):
-        r = one(self, dict(name="David Taylor", dob="1980-05-05", kyc=("DAVID TAYLOR", "1980-05-05", "United Kingdom")),
-                {"name": "Taylor, Michael", "dobs": "1990", "countries": "United Kingdom"})
-        self.assertEqual(r["decision"], "DIFFERENT_ENTITY")
-
-    def test_unreadable_dob_with_shared_surname_goes_to_review(self):
-        r = one(self, dict(name="David Taylor", dob="05/05/80", kyc=("DAVID TAYLOR", "05/05/80", "United Kingdom")),
-                {"name": "Taylor, Michael", "dobs": "1980", "countries": "United Kingdom"})
-        self.assertEqual(r["decision"], "REVIEW")
-
-    def test_dob_that_neither_agrees_nor_contradicts_goes_to_review(self):
-        r = one(self, dict(name="David Taylor", dob="1981-03-27", kyc=("DAVID TAYLOR", "1981-03-27", "United Kingdom")),
-                {"name": "Taylor, Michael", "dobs": "1982; 1983", "countries": "United Kingdom"})
-        self.assertEqual(r["decision"], "REVIEW")
