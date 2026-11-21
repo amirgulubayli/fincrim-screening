@@ -201,9 +201,12 @@ def test_company_legal_forms_are_not_parts():
 # ------------------------------------------------------------------ old Person / robustness
 
 
-def test_old_person_uses_latest_approved_kyc():
+def test_verified_kyc_name_beats_record_name():
+    from screening.identity import VerifiedIdentity
+
     kyc = KycCheck(check_id="KYC-7", verified_name="Chinedu Azeez", result="approved")
-    p = Person(records=(cust(full="Ridwan Azeez"),), kyc=(kyc,))
+    vid = VerifiedIdentity(source_id="KYC-7", kind="kyc_check", checked_at=None, name="Chinedu Azeez")
+    p = Person(records=(cust(full="Ridwan Azeez"),), kyc=(kyc,), identities=(vid,))
     r = one(name.check(ctx(["Ridwan Azeez"], p)))
     assert r.signal is Signal.CONTRADICTION and r.evidence == ("KYC-7",)
 
