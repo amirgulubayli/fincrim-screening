@@ -5,7 +5,7 @@
   screen eval --data DATA [--pred F]    score against practice_labels.jsonl
   screen repro --data DATA --runs 5     run N times in fresh processes, prove identical
   screen summary --data DATA            dataset + decision counts by HITL tier
-Add --json to any command for machine-readable output (Grok Bot / CI).
+Add --json to any command for machine-readable output (Grok Bot / scripts).
 """
 
 from __future__ import annotations

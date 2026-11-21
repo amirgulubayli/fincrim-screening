@@ -1,5 +1,5 @@
 # Dev environment only. The scored system (system/) uses the Python standard library
-# and must never depend on anything listed here (CI enforces this).
+# and must never depend on anything listed here (tests/test_stdlib_only.py enforces this).
 [project]
 name = "fincrim-screening"
 version = "0.1.0"

@@ -245,4 +245,4 @@ a needed fact is missing or uncertain.
 | R12 | Non-dated "According to" lines (month-year, Spanish copies, career ranges) used for TEMPORAL | exact regex `^According to [^;\n]+; <Month> <D>, <YYYY>:` per line. Earliest such date only. Customer age under 16 from the **verified** DOB, using the conservative edge (latest possible birth date) |
 | R13 | DECEASED from `life_status: Deceased` with no date, or a `YYYY-MM` date compared too precisely | need a parsed death date strictly before `screened_at`, comparing only the parts both give. If the date is missing, abstain |
 | R14 | Company vs person heuristics | only `entity_type`. Company DOB means incorporation and comes only from `dobs` |
-| R15 | Nondeterminism | sort every collection by id. No set iteration order in output. `screen repro --runs 5` must be byte-identical in CI for every PR |
+| R15 | Nondeterminism | sort every collection by id. No set iteration order in output. `screen repro --runs 5` must be byte-identical (run locally before every PR; `task.py done` checks) |

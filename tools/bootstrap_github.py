@@ -31,7 +31,7 @@ LABELS: dict[str, tuple[str, str]] = {
     "area:dashboard": ("fbca04", "Reviewer dashboard / UI"),
     "area:demo": ("f9d0c4", "Demo script, pitch, recordings"),
     "area:docs": ("c5def5", "Documentation"),
-    "area:infra": ("bfdadc", "CI, tooling, repo setup"),
+    "area:infra": ("bfdadc", "Tooling, repo setup"),
     "status:ready": ("0e8a16", "Ready to be claimed"),
     "status:claimed": ("fbca04", "Someone is working on it"),
     "status:in-review": ("1d76db", "PR open, awaiting review"),
