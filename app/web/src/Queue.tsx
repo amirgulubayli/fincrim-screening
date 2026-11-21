@@ -1,7 +1,7 @@
 import { useEffect, useRef, type RefObject } from "react";
 import { ENGINE_FLAGS, type Row, type Tier } from "./api";
-import { ENGINE_FLAG_LABEL, humanFlag, reasonLabel, STATUS_LABEL, TIER_BY_ID, TIERS, whyTier } from "./labels";
-import { AgreementBadge, Badge, StatusPill } from "./ui";
+import { DECISION_LABEL, ENGINE_FLAG_LABEL, humanFlag, reasonLabel, STATUS_LABEL, TIER_BY_ID, TIERS, whyTier } from "./labels";
+import { Popover, StatusPill } from "./ui";
 
 export type TierTab = Tier | "ALL";
 
@@ -20,6 +20,59 @@ const EMPTY_HINT: Record<TierTab, string> = {
   AUTO_CLEAR: "No hit had a hard contradiction, so nothing was cleared automatically. When in doubt, the engine sends hits to review.",
   ALL: "No hits in this run.",
 };
+
+/** Reason, flag, status and dual-control filters behind one "Filters" button. */
+function FilterMenu({ filters, setFilters, reasons, flags, engineCounts }: {
+  filters: Filters; setFilters: (f: Filters) => void; reasons: string[]; flags: string[]; engineCounts: Record<string, number>;
+}) {
+  const active = [filters.reason, filters.flag, filters.status, filters.engine].filter(Boolean).length;
+  return (
+    <div className="filter-bar">
+      <Popover className="filter-pop" buttonClass={`btn filter-btn ${active ? "has" : ""}`}
+        label={<>Filters{active > 0 && <span className="filter-count" aria-label={`${active} active`}>{active}</span>}</>}>
+        {() => (
+          <div className="filter-panel">
+            <label className="field">
+              <span>Reason</span>
+              <select value={filters.reason} onChange={(e) => setFilters({ ...filters, reason: e.target.value })}>
+                <option value="">Any reason</option>
+                {reasons.map((r) => <option key={r} value={r}>{reasonLabel(r)}</option>)}
+              </select>
+            </label>
+            <label className="field">
+              <span>Weak-evidence flag</span>
+              <select value={filters.flag} onChange={(e) => setFilters({ ...filters, flag: e.target.value })}>
+                <option value="">Any flag</option>
+                {flags.map((f) => <option key={f} value={f}>{humanFlag(f)}</option>)}
+              </select>
+            </label>
+            <label className="field">
+              <span>Case status</span>
+              <select value={filters.status} onChange={(e) => setFilters({ ...filters, status: e.target.value })}>
+                <option value="">Any status</option>
+                {Object.entries(STATUS_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+              </select>
+            </label>
+            <div className="field">
+              <span>Two engines</span>
+              <div className="engine-filter" role="group" aria-label="Dual-control filter">
+                {ENGINE_FLAGS.map((f) => (
+                  <button key={f} className={`chip ef ${filters.engine === f ? "on" : ""}`} aria-pressed={filters.engine === f}
+                    title={humanFlag(f)} onClick={() => setFilters({ ...filters, engine: filters.engine === f ? "" : f })}>
+                    {ENGINE_FLAG_LABEL[f].replace(/ \(.*\)$/, "")} <span className="count">{engineCounts[f] ?? 0}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+      </Popover>
+      {active > 0 && (
+        <button className="link clear-link" onClick={() => setFilters({ ...filters, reason: "", flag: "", status: "", engine: "" })}>Clear</button>
+      )}
+    </div>
+  );
+}
 
 export default function Queue({ rows, counts, engineCounts, tier, setTier, filters, setFilters, reasons, flags, selected, onSelect, searchRef }: {
   rows: Row[];
@@ -60,58 +113,39 @@ export default function Queue({ rows, counts, engineCounts, tier, setTier, filte
         </button>
       </div>
       <div className="filters">
-        <input ref={searchRef} className="search" placeholder="Search hit, alert, name, reason…  ( / )" value={filters.q}
+        <input ref={searchRef} className="search" placeholder="Search hit, name, reason…  ( / )" value={filters.q}
           onChange={(e) => setFilters({ ...filters, q: e.target.value })} aria-label="Search" />
-        <div className="filter-row">
-          <select value={filters.reason} onChange={(e) => setFilters({ ...filters, reason: e.target.value })} aria-label="Reason code">
-            <option value="">Any reason</option>
-            {reasons.map((r) => <option key={r} value={r}>{reasonLabel(r)}</option>)}
-          </select>
-          <select value={filters.flag} onChange={(e) => setFilters({ ...filters, flag: e.target.value })} aria-label="Flag">
-            <option value="">Any flag</option>
-            {flags.map((f) => <option key={f} value={f}>{f}</option>)}
-          </select>
-          <select value={filters.status} onChange={(e) => setFilters({ ...filters, status: e.target.value })} aria-label="Case status">
-            <option value="">Any status</option>
-            {Object.entries(STATUS_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-          </select>
-        </div>
-        <div className="engine-filter" role="group" aria-label="Dual-control filter">
-          <span className="small muted">Two engines:</span>
-          {ENGINE_FLAGS.map((f) => (
-            <button key={f} className={`chip ef ef-${f} ${filters.engine === f ? "on" : ""}`} aria-pressed={filters.engine === f}
-              title={humanFlag(f)} onClick={() => setFilters({ ...filters, engine: filters.engine === f ? "" : f })}>
-              {ENGINE_FLAG_LABEL[f].replace(/ \(.*\)$/, "")} <span className="count">{engineCounts[f] ?? 0}</span>
-            </button>
-          ))}
-        </div>
+        <FilterMenu filters={filters} setFilters={setFilters} reasons={reasons} flags={flags} engineCounts={engineCounts} />
       </div>
       <div className="list-meta small muted">
         {rows.length} {rows.length === 1 ? "hit" : "hits"}
         {tier !== "ALL" && <> · {TIER_BY_ID[tier].who}</>}
       </div>
       <ul className="list" ref={listRef}>
-        {rows.map((r) => (
-          <li key={r.hit_id} data-id={r.hit_id} className={`t-${r.tier} ${selected === r.hit_id ? "sel" : ""}`}
-            onClick={() => onSelect(r.hit_id)} aria-selected={selected === r.hit_id}>
-            <div className="row1">
-              <span className="mono strong">{r.hit_id}</span>
-              <Badge decision={r.decision} />
-              {r.review && r.review !== r.decision && (
-                <span className="small muted" title="Analyst decision">→ <Badge decision={r.review} /></span>
+        {rows.map((r) => {
+          const sel = selected === r.hit_id;
+          return (
+            <li key={r.hit_id} data-id={r.hit_id} className={`t-${r.tier} ${sel ? "sel" : ""}`}
+              onClick={() => onSelect(r.hit_id)} aria-selected={sel} title={whyTier(r)}>
+              <div className="row1">
+                {tier === "ALL" && <span className="dot tier-dot" aria-label={TIER_BY_ID[r.tier].short} />}
+                <span className="mono strong">{r.hit_id}</span>
+                <span className="grow" />
+                <StatusPill status={r.status} />
+              </div>
+              <div className="row2">
+                <span>{r.customer_name ?? "—"}</span>
+                <span className="muted"> vs {r.hit_name ?? "—"}</span>
+              </div>
+              {sel && (
+                <div className="row3">
+                  {whyTier(r)}
+                  {r.review && r.review !== r.decision && <> Analyst: <strong>{DECISION_LABEL[r.review] ?? r.review}</strong>.</>}
+                </div>
               )}
-              <span className="grow" />
-              {r.agreement && r.agreement !== "AGREE" && <AgreementBadge status={r.agreement} small />}
-              {r.flags.includes("ESCALATED_BY_POLICY") && <span className="policy-tag" title={humanFlag("ESCALATED_BY_POLICY")}>policy</span>}
-              <StatusPill status={r.status} />
-            </div>
-            <div className="row2">
-              <span>{r.customer_name ?? "—"}</span>
-              <span className="muted"> vs {r.hit_name ?? "—"}</span>
-            </div>
-            <div className="row3" title={r.flags.map(humanFlag).join("; ")}>{whyTier(r)}</div>
-          </li>
-        ))}
+            </li>
+          );
+        })}
         {!rows.length && (
           <li className="empty">
             <strong>{filtered ? "No hits match these filters." : "Queue is empty."}</strong>

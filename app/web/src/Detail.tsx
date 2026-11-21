@@ -2,21 +2,21 @@ import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "r
 import { api, type Detail, type EngineVerdict, type Person, type Rec, type TraceRow } from "./api";
 import { AGREEMENT_LABEL, DECISION_LABEL, FACET_LABEL, humanFlag, reasonLabel, TIER_BY_ID, whyTier } from "./labels";
 import type { Focus } from "./Tour";
-import { AgreementBadge, Badge, EvidenceList, fmt, SpotlightContext, StatusPill, TierPill } from "./ui";
+import { Badge, EvidenceList, fmt, Popover, Section, SpotlightContext, StatusPill, TierPill } from "./ui";
 
 const CORE_RULE = "CORE.aml";
 
 /** The human-in-the-loop instruction the engine wrote ("Reviewer: ..."). */
 function ReviewerCallout({ text }: { text: string }) {
   return (
-    <div className="reviewer-callout" role="note" aria-label="Reviewer action" data-focus="reviewer">
+    <div className="reviewer-callout" role="note" aria-label="Reviewer action" data-focus="reviewer"
+      title="Written by the decision core: what a person must check before closing this case.">
       <div className="rc-icon" aria-hidden>
         <svg viewBox="0 0 20 20"><path d="M10 2.5 18 17H2z" /><path d="M10 8v4M10 14.2v.3" /></svg>
       </div>
       <div>
         <div className="rc-head">Reviewer action</div>
         <p>{text.charAt(0).toUpperCase() + text.slice(1)}</p>
-        <div className="rc-foot">Written by the decision core: what a person must check before closing this case.</div>
       </div>
     </div>
   );
@@ -43,13 +43,8 @@ function EnginesPanel({ d }: { d: Detail }) {
   const checkRows = d.decision.trace.filter((t) => t.rule_id !== CORE_RULE);
   const decisive = checkRows.filter((t) => t.signal !== "neutral");
   return (
-    <div className="block engines" data-focus="engines">
-      <div className="engines-head">
-        <h3>Two independent engines</h3>
-        <AgreementBadge status={e.agreement} />
-        {e.escalated_by_policy && <span className="policy-tag" title={humanFlag("ESCALATED_BY_POLICY")}>escalated by policy</span>}
-        <span className="small muted grow-text">{AGREEMENT_LABEL[e.agreement]?.long}</span>
-      </div>
+    <div className="engines">
+      <p className="sec-lede">{AGREEMENT_LABEL[e.agreement]?.long}{e.escalated_by_policy ? " Escalated by a Head of Financial Crime policy call, not cleared." : ""}</p>
       <div className="engines-grid">
         <div className="engine-col core">
           <div className="engine-title">Decision core <span className="muted small">· decides</span></div>
@@ -76,7 +71,7 @@ function EnginesPanel({ d }: { d: Detail }) {
               ))}
               {!checkRows.length && <li className="muted small">No facet rule spoke — the check found nothing decisive.</li>}
               {decisive.length > 0 && decisive.length < checkRows.length && (
-                <li className="muted small">+{checkRows.length - decisive.length} neutral facet result(s) in the rule trace below.</li>
+                <li className="muted small">+{checkRows.length - decisive.length} neutral facet result(s) in the rule trace.</li>
               )}
             </ul>
           ) : <p className="muted small">The independent check did not run in this engine mode.</p>}
@@ -226,7 +221,7 @@ function Compare({ d, person }: { d: Detail; person: Person | undefined }) {
   const kyc = latestKyc(person);
   const trace = d.decision.trace;
   return (
-    <table className="compare" data-focus="compare">
+    <table className="compare">
       <thead>
         <tr>
           <th className="facet-col"></th>
@@ -393,18 +388,14 @@ function ActionPanel({ d, onDone }: { d: Detail; onDone: () => void }) {
     }
   };
 
+  const hint = c.status === "AWAITING_SECOND"
+    ? `4-eyes: ${c.analysts.join(", ")} chose ${DECISION_LABEL[c.final_decision ?? ""] ?? c.final_decision}; a different analyst must confirm.`
+    : d.decision.tier === "BORDERLINE"
+      ? "4-eyes: two different analysts must agree."
+      : "Logged with your name, time and note.";
+
   return (
-    <div className="action-panel">
-      <div className="ap-head">
-        <h3>Analyst decision</h3>
-        <span className="small muted">
-          {c.status === "AWAITING_SECOND"
-            ? `4-eyes: ${c.analysts.join(", ")} chose ${DECISION_LABEL[c.final_decision ?? ""] ?? c.final_decision}; a different analyst must confirm.`
-            : d.decision.tier === "BORDERLINE"
-              ? "4-eyes check: two different analysts must agree."
-              : "Every action is logged with your name, time and note."}
-        </span>
-      </div>
+    <div className="action-panel" aria-label="Analyst decision">
       <div className="ap-row">
         <label className="field">
           <span>Analyst</span>
@@ -414,7 +405,7 @@ function ActionPanel({ d, onDone }: { d: Detail; onDone: () => void }) {
           <span>Note (required)</span>
           <textarea
             value={note}
-            rows={2}
+            rows={1}
             onChange={(e) => setNote(e.target.value)}
             placeholder="Which facts did you check? e.g. KYC DOB 1981-04-02 differs from the hit's 1956 DOB."
           />
@@ -424,16 +415,20 @@ function ActionPanel({ d, onDone }: { d: Detail; onDone: () => void }) {
         <button className="btn primary" disabled={busy} onClick={() => submit("CONFIRM")}>
           Accept engine: {DECISION_LABEL[engine] ?? engine}
         </button>
-        <span className="muted small">or override to</span>
-        {ACTIONS.filter((a) => a.id !== engine).map((a) => (
-          <button key={a.id} className={`btn ${a.id === "DIFFERENT_ENTITY" ? "warn" : ""}`} disabled={busy} onClick={() => submit(a.id)}>
-            {a.label}
-          </button>
-        ))}
+        <Popover label="Override" buttonClass="btn" className="override-menu">
+          {(close) => (
+            <>
+              {ACTIONS.filter((x) => x.id !== engine).map((x) => (
+                <button key={x.id} role="menuitem" className="menu-item" disabled={busy} onClick={() => { close(); submit(x.id); }}>
+                  {x.label}
+                  {x.id === "DIFFERENT_ENTITY" && engine !== "DIFFERENT_ENTITY" && <span className="menu-note">needs a documented contradiction and a second analyst</span>}
+                </button>
+              ))}
+            </>
+          )}
+        </Popover>
+        <span className="muted small ap-hint">{hint}</span>
       </div>
-      {engine !== "DIFFERENT_ENTITY" && (
-        <div className="small muted">Clearing a hit the engine did not clear needs a documented contradiction and a second analyst.</div>
-      )}
       {sameAnalyst && <div className="small warn-text">You already reviewed this case; the second check must come from a different analyst.</div>}
       {err && <div className="error small">{err}</div>}
       {ok && <div className="ok small">{ok}</div>}
@@ -502,6 +497,7 @@ export default function DetailPane({ id, onReviewed, focus = null }: { id: strin
   const label = d.practice_label;
   const tier = TIER_BY_ID[dec.tier];
   const v = (VERDICT[dec.tier] ?? VERDICT.HUMAN_REVIEW)(dec.decision);
+  const eng = dec.engines;
   return (
     <section className="detail" aria-label={`Case file ${dec.hit_id}`} ref={rootRef}>
       <div className={`verdict t-${dec.tier}`} data-focus="verdict" key={dec.hit_id}>
@@ -511,107 +507,146 @@ export default function DetailPane({ id, onReviewed, focus = null }: { id: strin
           <span className="mono verdict-id">{dec.hit_id}</span>
           <StatusPill status={d.case.status} />
         </div>
-        <div className="verdict-main">
-          <div className="verdict-words">
-            <h2 className="verdict-head">{v.head}</h2>
-            <div className="verdict-sub">{v.sub}</div>
-          </div>
-          <dl className="verdict-facts">
-            <div><dt>Decision</dt><dd><Badge decision={dec.decision} /></dd></div>
-            <div><dt>Reason</dt><dd title={dec.reason_code}>{reasonLabel(dec.reason_code)}</dd></div>
-            <div><dt>Engines</dt><dd>{dec.engines ? <AgreementBadge status={dec.engines.agreement} /> : "single"}</dd></div>
-            <div><dt>Customer</dt><dd className="mono">{dec.customer_record_id ?? "none resolved"}</dd></div>
-          </dl>
+        <h2 className="verdict-head">{v.head}</h2>
+        <div className="verdict-line">
+          <span>{reasonLabel(dec.reason_code)}</span>
+          <span className="sep" aria-hidden>·</span>
+          <span>customer <span className="mono">{dec.customer_record_id ?? "none resolved"}</span></span>
+          {d.reviews.length > 0 && d.case.final_decision && (
+            <>
+              <span className="sep" aria-hidden>·</span>
+              <span>analyst: <strong>{DECISION_LABEL[d.case.final_decision] ?? d.case.final_decision}</strong>
+                {d.case.final_decision !== dec.decision && " (overrides engine)"}</span>
+            </>
+          )}
         </div>
-        {(d.reviews.length > 0 && d.case.final_decision) || label ? (
-          <div className="verdict-foot">
-            {d.reviews.length > 0 && d.case.final_decision && (
-              <span className="final-box">
-                analyst: <Badge decision={d.case.final_decision} />
-                {d.case.final_decision !== dec.decision && <strong> overrides engine</strong>}
-              </span>
-            )}
-            {label && (
-              <span className={`label-box ${label.decision === dec.decision ? "agree" : "differ"}`} title={fmt(label.reference_reason)}>
-                practice label: {DECISION_LABEL[String(label.decision)] ?? String(label.decision)}
-                {label.decision === dec.decision ? " · engine agrees" : " · engine differs"}
-              </span>
-            )}
-          </div>
-        ) : null}
       </div>
 
-      <div className="decision-card">
-        <div className="why"><span className="why-k">Why this tier</span> {whyTier(dec)} <span className="muted">{tier?.who}.</span></div>
-        <p className="reason">{dec.engines?.reviewer_action ? stripReviewer(dec.reason) : dec.reason}</p>
-        {dec.engines?.reviewer_action && <ReviewerCallout text={dec.engines.reviewer_action} />}
-        <div className="dc-row">
-          <span className="k">Deciding evidence</span>
-          <EvidenceList ids={dec.evidence} empty="no record cited (nothing decisive)" />
-        </div>
-        {dec.flags.length > 0 && (
-          <div className="dc-row">
-            <span className="k">Flags</span>
-            <div className="chips">{dec.flags.map((f) => <span key={f} className="chip flag" title={f}>{humanFlag(f)}</span>)}</div>
-          </div>
-        )}
-      </div>
-
-      <EnginesPanel d={d} />
+      <p className="reason">{eng?.reviewer_action ? stripReviewer(dec.reason) : dec.reason}</p>
+      {eng?.reviewer_action && <ReviewerCallout text={eng.reviewer_action} />}
 
       <ActionPanel d={d} onDone={() => { load(); onReviewed(); }} />
 
-      <div className="block">
-        <h3>Customer vs watchlist hit</h3>
-        <Compare d={d} person={chosen} />
-        <div className="legend small muted">
-          <span><MarkLabel kind="agree" /> supports a match</span>
-          <span><MarkLabel kind="contradict" /> rules the hit out</span>
-          <span><MarkLabel kind="inconclusive" /> checked, settles nothing</span>
-          <span><MarkLabel kind="unchecked" /> no rule spoke: a missing fact is never a contradiction</span>
-        </div>
-        {Boolean(d.hit.profile_notes || d.hit.details || d.hit.position_or_allegation) && (
-          <details className="hit-more">
-            <summary>Watchlist profile text</summary>
-            {d.hit.position_or_allegation ? <p><strong>Position / allegation:</strong> {fmt(d.hit.position_or_allegation)}</p> : null}
-            {d.hit.details ? <p>{fmt(d.hit.details)}</p> : null}
-            {d.hit.profile_notes ? <p>{fmt(d.hit.profile_notes)}</p> : null}
-          </details>
+      <div className="sections">
+        <Section id="compare" focusKey="compare" force={focus === "compare"} title="Customer vs hit" summary={compareSummary(d.decision.trace)}>
+          <Compare d={d} person={chosen} />
+          <div className="legend small muted">
+            <span><MarkLabel kind="agree" /> supports a match</span>
+            <span><MarkLabel kind="contradict" /> rules the hit out</span>
+            <span><MarkLabel kind="inconclusive" /> checked, settles nothing</span>
+            <span><MarkLabel kind="unchecked" /> no rule spoke: a missing fact is never a contradiction</span>
+          </div>
+          {Boolean(d.hit.profile_notes || d.hit.details || d.hit.position_or_allegation) && (
+            <details className="hit-more">
+              <summary>Watchlist profile text</summary>
+              {d.hit.position_or_allegation ? <p><strong>Position / allegation:</strong> {fmt(d.hit.position_or_allegation)}</p> : null}
+              {d.hit.details ? <p>{fmt(d.hit.details)}</p> : null}
+              {d.hit.profile_notes ? <p>{fmt(d.hit.profile_notes)}</p> : null}
+            </details>
+          )}
+        </Section>
+
+        {eng && (
+          <Section id="engines" focusKey="engines" force={focus === "engines"} title="Two engines"
+            summary={<span className={`ag-text ag-${eng.agreement}`}>{AGREEMENT_LABEL[eng.agreement]?.short.toLowerCase() ?? eng.agreement}
+              {eng.agreement !== "AGREE" && eng.core?.decision && eng.check?.decision
+                ? ` — core: ${DECISION_LABEL[eng.core.decision] ?? eng.core.decision}, check: ${DECISION_LABEL[eng.check.decision] ?? eng.check.decision}`
+                : ""}</span>}>
+            <EnginesPanel d={d} />
+          </Section>
         )}
-      </div>
 
-      <div className="block">
-        <h3>Resolution path — who is the customer?</h3>
-        <Resolution d={d} person={chosenIdx} setPerson={setPerson} />
-      </div>
+        <Section id="evidence" title="Evidence"
+          summary={`${new Set(dec.evidence).size || "no"} record${new Set(dec.evidence).size === 1 ? "" : "s"}${dec.flags.length ? ` · ${dec.flags.length} flag${dec.flags.length === 1 ? "" : "s"}` : ""}${label ? ` · practice label ${label.decision === dec.decision ? "agrees" : "differs"}` : ""}`}>
+          <div className="dc-row">
+            <span className="k">Deciding records</span>
+            <EvidenceList ids={dec.evidence} empty="no record cited (nothing decisive)" />
+          </div>
+          {dec.flags.length > 0 && (
+            <div className="dc-row">
+              <span className="k">Flags</span>
+              <div className="chips">{dec.flags.map((f) => <span key={f} className="chip flag" title={f}>{humanFlag(f)}</span>)}</div>
+            </div>
+          )}
+          <div className="dc-row">
+            <span className="k">Why this tier</span>
+            <span>{whyTier(dec)} <span className="muted">{tier?.who}.</span></span>
+          </div>
+          {label && (
+            <div className="dc-row">
+              <span className="k">Practice label</span>
+              <span title={fmt(label.reference_reason)}>
+                {DECISION_LABEL[String(label.decision)] ?? String(label.decision)}
+                <span className="muted">{label.decision === dec.decision ? " · engine agrees" : " · engine differs"}</span>
+              </span>
+            </div>
+          )}
+        </Section>
 
-      <div className="block">
-        <h3>Rule trace <span className="muted small">— {CORE_RULE} is the decision core; the rest is the independent check</span></h3>
-        <Timeline d={d} />
-      </div>
+        <Section id="trace" title="Rule trace" summary={traceSummary(dec.trace)}>
+          <p className="sec-lede">{CORE_RULE} is the decision core; the rest is the independent check.</p>
+          <Timeline d={d} />
+        </Section>
 
-      <div className="block">
-        <h3>Case audit trail</h3>
-        {d.reviews.length ? (
-          <table className="grid">
-            <thead><tr><th>#</th><th>When (UTC)</th><th>Analyst</th><th>Action</th><th>Decision</th><th>Note</th></tr></thead>
-            <tbody>
-              {d.reviews.map((r) => (
-                <tr key={r.seq}>
-                  <td className="mono">{r.seq}</td>
-                  <td className="mono nowrap">{r.at.replace("T", " ").replace("+00:00", "")}</td>
-                  <td>{r.analyst}</td>
-                  <td className={r.action === "override" ? "strong" : ""}>{r.action}</td>
-                  <td><Badge decision={r.decision} /></td>
-                  <td>{r.note}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : (
-          <p className="muted small">No analyst action yet. Engine version and decision are reproducible from the same input.</p>
-        )}
+        <Section id="resolution" title="How the customer was found" summary={resolutionSummary(d)}>
+          <Resolution d={d} person={chosenIdx} setPerson={setPerson} />
+        </Section>
+
+        <Section id="audit" title="Case audit trail"
+          summary={d.reviews.length ? `${d.reviews.length} analyst action${d.reviews.length === 1 ? "" : "s"} · ${d.case.status === "AWAITING_SECOND" ? "awaiting second analyst" : d.case.status.toLowerCase()}` : "no analyst action yet"}>
+          {d.reviews.length ? (
+            <table className="grid">
+              <thead><tr><th>#</th><th>When (UTC)</th><th>Analyst</th><th>Action</th><th>Decision</th><th>Note</th></tr></thead>
+              <tbody>
+                {d.reviews.map((r) => (
+                  <tr key={r.seq}>
+                    <td className="mono">{r.seq}</td>
+                    <td className="mono nowrap">{r.at.replace("T", " ").replace("+00:00", "")}</td>
+                    <td>{r.analyst}</td>
+                    <td className={r.action === "override" ? "strong" : ""}>{r.action}</td>
+                    <td><Badge decision={r.decision} /></td>
+                    <td>{r.note}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <p className="muted small">No analyst action yet. Engine version and decision are reproducible from the same input.</p>
+          )}
+        </Section>
       </div>
     </section>
   );
+}
+
+const SUM_MARK: Record<Mark["kind"], string> = { agree: "✓", contradict: "✗", inconclusive: "~", unchecked: "?" };
+
+/** "name ✓ · DOB ✗ · country ✓" — the comparison at a glance. */
+function compareSummary(trace: TraceRow[]): string {
+  const parts: [string, string[]][] = [["name", ["name"]], ["DOB", ["dob", "time"]], ["country", ["location"]], ["type", ["type"]], ["status", ["deceased"]]];
+  return parts
+    .map(([label, facets]) => [label, markFor(trace, facets).kind] as const)
+    .filter(([label, kind], i) => i < 3 || kind === "contradict" || kind === "agree")
+    .map(([label, kind]) => `${label} ${SUM_MARK[kind]}`)
+    .join(" · ");
+}
+
+function traceSummary(trace: TraceRow[]): string {
+  const n = trace.length;
+  const c = trace.filter((t) => t.signal === "contradiction").length;
+  const a = trace.filter((t) => t.signal === "agreement").length;
+  const bits = [`${n} check${n === 1 ? "" : "s"}`];
+  if (c) bits.push(`${c} contradiction${c === 1 ? "" : "s"}`);
+  if (a) bits.push(`${a} agreement${a === 1 ? "" : "s"}`);
+  return bits.join(", ");
+}
+
+function resolutionSummary(d: Detail): string {
+  const r = d.resolution;
+  if (!r || r.method === "unlinked") return "no link on the alert, screened details only";
+  if (!r.persons.length) return `${r.method.replace(/_/g, " ")} link, no customer record`;
+  const how = `${r.method.replace(/_/g, " ")} link`;
+  if (r.persons.length > 1) return `${how}, ${r.persons.length} different people fit`;
+  const recs = r.persons[0].record_ids.length;
+  return recs > 1 ? `${how}, ${recs} records merged` : `${how}, 1 record`;
 }
