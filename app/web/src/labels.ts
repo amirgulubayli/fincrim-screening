@@ -100,6 +100,8 @@ export function whyTier(r: { tier: Tier; decision: string; reason_code: string; 
     default:
       if (r.reason_code === "AMBIGUOUS_CUSTOMER_RECORD")
         return "Several customers fit the alert and they lead to different outcomes.";
+      if (r.flags.includes("ESCALATED_BY_POLICY"))
+        return "A Head of Financial Crime policy call keeps this in review instead of clearing it.";
       return "Nothing contradicts the hit and agreement is not strong enough to confirm it.";
   }
 }
