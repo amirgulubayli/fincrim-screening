@@ -1,27 +1,31 @@
 """Demo dashboard API (not scored). Wraps the stdlib engine under system/.
 
 Run from the repo root:  uv run uvicorn app.server.main:app --port 8000
-Data folder comes from env SCREEN_DATA (default data/dev).
+Data folder comes from env SCREEN_DATA (default data/dev, relative paths resolve from the repo root).
 """
 
 from __future__ import annotations
 
 import asyncio
+import csv
 import dataclasses
+import io
 import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 import threading
 import time
-from collections import Counter
+from collections import Counter, defaultdict
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -36,11 +40,26 @@ from screening.loaders import Dataset, load_dataset  # noqa: E402
 from screening.pipeline import run as run_pipeline  # noqa: E402
 from screening.resolve import resolve_customer  # noqa: E402
 
-DATA_DIR = Path(os.environ.get("SCREEN_DATA", "data/dev"))
+
+def _data_dir() -> Path:
+    p = Path(os.environ.get("SCREEN_DATA", "data/dev")).expanduser()
+    return (p if p.is_absolute() else ROOT / p).resolve()
+
+
+DATA_DIR = _data_dir()
 REVIEWS = ROOT / "out" / "reviews.jsonl"
+REPRO_DIR = ROOT / "output" / "repro"
 DIST = Path(__file__).resolve().parents[1] / "web" / "dist"
 ALLOWED_SUBCOMMANDS = {"run", "explain", "eval", "repro", "summary"}
-SHELL_META = re.compile(r"[;&|`$<>()\\{}\[\]*?!~\n\r\"']")
+DATA_SUBCOMMANDS = {"explain", "eval", "repro", "summary"}  # take --data DIR
+# Backslashes are turned into forward slashes first (Windows paths); argv is executed without a shell.
+SHELL_META = re.compile(r"[;&|`$<>(){}\[\]*?!~\n\r\"']")
+WRITABLE_DIRS = (ROOT / "output", ROOT / "out")
+COMMAND_TIMEOUT = float(os.environ.get("SCREEN_TERMINAL_TIMEOUT", "240"))
+REPRO_RUNS = 5
+AUTOMATED_TIERS = {"AUTO_CLEAR", "AUTO_ESCALATE"}
+REVIEW_DECISIONS = {"CONFIRM", "SAME_ENTITY", "DIFFERENT_ENTITY", "REVIEW"}
+MIN_NOTE = 5
 
 
 class State:
@@ -48,6 +67,9 @@ class State:
     decisions: dict[str, dict[str, Any]] = {}
     summary: dict[str, Any] = {}
     lock = threading.Lock()
+    reviews_lock = threading.Lock()
+    repro_running = False
+    repro_error: str | None = None
 
 
 STATE = State()
@@ -69,13 +91,27 @@ def compute() -> dict[str, Any]:
     results = run_pipeline(ds)
     run_s = time.perf_counter() - t1
     decisions = {d.hit_id: d.full() for d in results}
+    rule_stats: dict[str, Counter[str]] = defaultdict(Counter)
+    for d in decisions.values():
+        for t in d["trace"]:
+            rule_stats[t["rule_id"]][t["signal"]] += 1
+    tiers = Counter(d["tier"] for d in decisions.values())
+    automated = sum(tiers.get(t, 0) for t in AUTOMATED_TIERS)
     summary: dict[str, Any] = {
         "engine_version": __version__,
-        "data": str(DATA_DIR),
+        "data": DATA_DIR.as_posix(),
         "dataset": ds.summary(),
         "hits": len(decisions),
         "decisions": dict(sorted(Counter(d["decision"] for d in decisions.values()).items())),
-        "tiers": dict(sorted(Counter(d["tier"] for d in decisions.values()).items())),
+        "tiers": dict(sorted(tiers.items())),
+        "reason_codes": dict(sorted(Counter(d["reason_code"] for d in decisions.values()).items())),
+        "flags": dict(sorted(Counter(f for d in decisions.values() for f in d["flags"]).items())),
+        "rule_stats": {k: dict(sorted(v.items())) for k, v in sorted(rule_stats.items())},
+        "automation": {
+            "automated": automated,
+            "needs_human": len(decisions) - automated,
+            "rate": round(automated / len(decisions), 4) if decisions else None,
+        },
         "load_seconds": round(load_s, 2),
         "run_seconds": round(run_s, 2),
         "ran_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -91,65 +127,146 @@ def compute() -> dict[str, Any]:
     return summary
 
 
+# ------------------------------------------------------------------ analyst reviews (audit log)
+
+
 def load_reviews(hit_id: str | None = None) -> list[dict[str, Any]]:
     if not REVIEWS.exists():
         return []
     out = []
-    for line in REVIEWS.read_text(encoding="utf-8").splitlines():
+    for i, line in enumerate(REVIEWS.read_text(encoding="utf-8").splitlines(), 1):
         if line.strip():
             row = json.loads(line)
+            row.setdefault("seq", i)
             if hit_id is None or row.get("hit_id") == hit_id:
                 out.append(row)
     return out
 
 
-app = FastAPI(title="Screening dashboard", version=__version__)
+def reviews_by_hit() -> dict[str, list[dict[str, Any]]]:
+    out: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for r in load_reviews():
+        out[r["hit_id"]].append(r)
+    return out
 
 
-@app.on_event("startup")
-async def _startup() -> None:
+def case_status(d: dict[str, Any], reviews: list[dict[str, Any]]) -> dict[str, Any]:
+    """Where the case stands in the human loop.
+
+    AUTOMATED        engine decided on solid evidence, no person needed (QA sample only)
+    OPEN             needs a person, nobody has reviewed it yet
+    AWAITING_SECOND  4-eyes: BORDERLINE tier, or an analyst cleared a hit the engine did not clear;
+                     a second, different analyst must reach the same decision
+    CLOSED           reviewed (and second-checked where required)
+    """
+    if not reviews:
+        status = "AUTOMATED" if d["tier"] in AUTOMATED_TIERS else "OPEN"
+        return {"status": status, "final_decision": d["decision"] if status == "AUTOMATED" else None,
+                "analysts": []}
+    last = reviews[-1]
+    latest: dict[str, str] = {}
+    for r in reviews:
+        latest[(r.get("analyst") or "").strip().lower()] = r["decision"]
+    agreeing = sorted(a for a, dec in latest.items() if dec == last["decision"])
+    clears = last["decision"] == "DIFFERENT_ENTITY" and d["decision"] != "DIFFERENT_ENTITY"
+    needs_two = d["tier"] == "BORDERLINE" or clears
+    status = "CLOSED" if not needs_two or len(agreeing) >= 2 else "AWAITING_SECOND"
+    return {"status": status, "final_decision": last["decision"], "analysts": agreeing,
+            "four_eyes": needs_two}
+
+
+# ------------------------------------------------------------------ repro badge
+
+
+def read_repro() -> dict[str, Any]:
+    path = REPRO_DIR / "report.json"
+    report = None
+    at = None
+    if path.exists():
+        try:
+            report = json.loads(path.read_text(encoding="utf-8"))
+            at = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(timespec="seconds")
+        except (OSError, ValueError):
+            report = None
+    return {"report": report, "at": at, "running": STATE.repro_running, "error": STATE.repro_error}
+
+
+def _run_repro() -> None:
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(SYSTEM / "screen.py"), "repro", "--data", DATA_DIR.as_posix(),
+             "--runs", str(REPRO_RUNS), "--out-dir", REPRO_DIR.as_posix(), "--json"],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=900,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+        STATE.repro_error = None if proc.returncode in (0, 1) else (proc.stderr or proc.stdout)[-500:]
+    except Exception as exc:  # surfaced in the UI, never crashes the server
+        STATE.repro_error = str(exc)
+    finally:
+        STATE.repro_running = False
+
+
+# ------------------------------------------------------------------ app
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
     await asyncio.to_thread(compute)
+    yield
+
+
+app = FastAPI(title="Screening dashboard", version=__version__, lifespan=lifespan)
 
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
-    return {"ok": STATE.ds is not None, "engine_version": __version__, "data": str(DATA_DIR)}
+    return {"ok": STATE.ds is not None, "engine_version": __version__, "data": DATA_DIR.as_posix()}
 
 
 @app.get("/api/summary")
 def summary() -> dict[str, Any]:
-    reviewed = {r["hit_id"] for r in load_reviews()}
-    return {**STATE.summary, "reviewed_hits": len(reviewed)}
+    by_hit = reviews_by_hit()
+    statuses = Counter(case_status(d, by_hit.get(h, []))["status"] for h, d in STATE.decisions.items())
+    return {**STATE.summary, "reviewed_hits": len(by_hit), "case_status": dict(sorted(statuses.items())),
+            "repro": read_repro()}
+
+
+def _row(d: dict[str, Any], reviews: list[dict[str, Any]]) -> dict[str, Any]:
+    ds = STATE.ds
+    hit = ds.hits.get(d["hit_id"]) if ds else None
+    alert = ds.alerts.get(d["alert_id"]) if ds else None
+    cs = case_status(d, reviews)
+    return {
+        "hit_id": d["hit_id"],
+        "alert_id": d["alert_id"],
+        "decision": d["decision"],
+        "reason_code": d["reason_code"],
+        "tier": d["tier"],
+        "customer_record_id": d["customer_record_id"],
+        "hit_name": hit.name if hit else None,
+        "customer_name": alert.customer_name if alert else None,
+        "flags": d["flags"],
+        "review": reviews[-1]["decision"] if reviews else None,
+        "status": cs["status"],
+        "final_decision": cs["final_decision"],
+    }
 
 
 @app.get("/api/decisions")
 def decisions(tier: str | None = None, decision: str | None = None, q: str | None = None) -> list[dict]:
-    ds = STATE.ds
     ql = (q or "").strip().lower()
-    reviewed = {r["hit_id"]: r for r in load_reviews()}
+    by_hit = reviews_by_hit()
     rows = []
     for d in STATE.decisions.values():
         if tier and d["tier"] != tier:
             continue
         if decision and d["decision"] != decision:
             continue
-        hit = ds.hits.get(d["hit_id"]) if ds else None
-        alert = ds.alerts.get(d["alert_id"]) if ds else None
-        row = {
-            "hit_id": d["hit_id"],
-            "alert_id": d["alert_id"],
-            "decision": d["decision"],
-            "reason_code": d["reason_code"],
-            "tier": d["tier"],
-            "customer_record_id": d["customer_record_id"],
-            "hit_name": hit.name if hit else None,
-            "customer_name": alert.customer_name if alert else None,
-            "flags": d["flags"],
-            "review": reviewed.get(d["hit_id"], {}).get("decision"),
-        }
+        row = _row(d, by_hit.get(d["hit_id"], []))
         if ql and ql not in " ".join(str(v) for v in row.values() if v).lower():
             continue
         rows.append(row)
+    rows.sort(key=lambda r: r["hit_id"])
     return rows
 
 
@@ -182,20 +299,51 @@ def hit_detail(hit_id: str) -> dict[str, Any]:
             ],
         }
     label = ds.practice_labels.get(hit_id)
+    reviews = load_reviews(hit_id)
     return {
         "decision": d,
         "hit": _record(hit),
         "alert": _record(alert),
         "resolution": resolution,
         "practice_label": _record(label),
-        "reviews": load_reviews(hit_id),
+        "reviews": reviews,
+        "case": case_status(d, reviews),
     }
+
+
+@app.get("/api/records/{record_id}")
+def record(record_id: str) -> dict[str, Any]:
+    """Read-only lookup of any record id cited as evidence."""
+    ds = STATE.ds
+    if ds is None:
+        raise HTTPException(503, "dataset not loaded")
+    rid = record_id.strip()
+    tables = (
+        ("customer", ds.customers),
+        ("kyc_check", ds.kyc_checks),
+        ("note", ds.notes),
+        ("search_result", ds.search_results),
+        ("hit", ds.hits),
+        ("alert", ds.alerts),
+    )
+    for kind, table in tables:
+        if rid in table:
+            return {"id": rid, "kind": kind, "record": _record(table[rid])}
+    if rid in ds.accounts_by_id:
+        accts = ds.accounts_by_id[rid]
+        return {"id": rid, "kind": "account", "record": _record(accts[0]),
+                "holders": [a.customer_id for a in accts]}
+    if rid in ds.kyc_by_applicant:
+        checks = sorted(ds.kyc_by_applicant[rid], key=lambda k: (k.checked_at or "", k.check_id))
+        return {"id": rid, "kind": "kyc_applicant", "record": {"applicant_id": rid,
+                "check_ids": [k.check_id for k in checks]}}
+    raise HTTPException(404, f"no record with id {rid}")
 
 
 class Review(BaseModel):
     decision: str  # CONFIRM | SAME_ENTITY | DIFFERENT_ENTITY | REVIEW
     note: str = ""
-    analyst: str = "analyst"
+    analyst: str = ""
 
 
 @app.post("/api/hits/{hit_id}/review")
@@ -203,26 +351,73 @@ def review(hit_id: str, body: Review) -> dict[str, Any]:
     d = STATE.decisions.get(hit_id)
     if d is None:
         raise HTTPException(404, f"unknown hit {hit_id}")
-    allowed = {"CONFIRM", "SAME_ENTITY", "DIFFERENT_ENTITY", "REVIEW"}
-    if body.decision not in allowed:
-        raise HTTPException(422, f"decision must be one of {sorted(allowed)}")
+    if body.decision not in REVIEW_DECISIONS:
+        raise HTTPException(422, f"decision must be one of {sorted(REVIEW_DECISIONS)}")
+    note, analyst = body.note.strip(), body.analyst.strip()
+    if len(note) < MIN_NOTE:
+        raise HTTPException(422, "a note explaining the decision is required for every analyst action")
+    if not analyst:
+        raise HTTPException(422, "analyst name is required")
     final = d["decision"] if body.decision == "CONFIRM" else body.decision
-    row = {
-        "hit_id": hit_id,
-        "alert_id": d["alert_id"],
-        "engine_decision": d["decision"],
-        "engine_reason_code": d["reason_code"],
-        "action": "confirm" if body.decision == "CONFIRM" or final == d["decision"] else "override",
-        "decision": final,
-        "note": body.note,
-        "analyst": body.analyst or "analyst",
-        "engine_version": __version__,
-        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-    }
-    REVIEWS.parent.mkdir(parents=True, exist_ok=True)
-    with REVIEWS.open("a", encoding="utf-8", newline="\n") as fh:
-        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-    return row
+    with STATE.reviews_lock:
+        seq = len(load_reviews()) + 1
+        row = {
+            "seq": seq,
+            "hit_id": hit_id,
+            "alert_id": d["alert_id"],
+            "engine_tier": d["tier"],
+            "engine_decision": d["decision"],
+            "engine_reason_code": d["reason_code"],
+            "action": "confirm" if final == d["decision"] else "override",
+            "decision": final,
+            "note": note,
+            "analyst": analyst,
+            "engine_version": __version__,
+            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        REVIEWS.parent.mkdir(parents=True, exist_ok=True)
+        with REVIEWS.open("a", encoding="utf-8", newline="\n") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return {**row, "case": case_status(d, load_reviews(hit_id))}
+
+
+AUDIT_COLUMNS = ("seq", "at", "analyst", "hit_id", "alert_id", "engine_tier", "engine_decision",
+                 "engine_reason_code", "action", "decision", "case_status", "note", "engine_version")
+
+
+def _csv_safe(v: Any) -> Any:
+    """Stop spreadsheet formula injection from free-text notes / names."""
+    if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + v
+    return v
+
+
+def _audit_rows() -> list[dict[str, Any]]:
+    by_hit = reviews_by_hit()
+    out = []
+    for r in load_reviews():
+        d = STATE.decisions.get(r["hit_id"])
+        prior = [x for x in by_hit.get(r["hit_id"], []) if x["seq"] <= r["seq"]]
+        status = case_status(d, prior)["status"] if d else None
+        out.append({**r, "case_status": status})
+    return out
+
+
+@app.get("/api/reviews")
+def reviews() -> list[dict[str, Any]]:
+    return list(reversed(_audit_rows()))
+
+
+@app.get("/api/reviews.csv")
+def reviews_csv() -> Response:
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=AUDIT_COLUMNS, extrasaction="ignore", lineterminator="\n")
+    w.writeheader()
+    for r in _audit_rows():
+        w.writerow({k: _csv_safe(r.get(k, "")) for k in AUDIT_COLUMNS})
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return Response(buf.getvalue(), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="audit-trail-{stamp}.csv"'})
 
 
 @app.post("/api/run")
@@ -230,27 +425,148 @@ async def rerun() -> dict[str, Any]:
     return await asyncio.to_thread(compute)
 
 
+@app.get("/api/repro")
+def repro_status() -> dict[str, Any]:
+    return read_repro()
+
+
+@app.post("/api/repro")
+def repro_start() -> dict[str, Any]:
+    if not STATE.repro_running:
+        STATE.repro_running = True
+        STATE.repro_error = None
+        threading.Thread(target=_run_repro, daemon=True).start()
+    return read_repro()
+
+
+# ------------------------------------------------------------------ terminal
+
+
+def _check_writable(value: str) -> str:
+    p = Path(value)
+    p = (p if p.is_absolute() else ROOT / p).resolve()
+    if not any(p == w or w in p.parents for w in (d.resolve() for d in WRITABLE_DIRS)):
+        raise ValueError(f"output paths must be under output/ or out/ (got {value})")
+    return value
+
+
 def parse_command(line: str) -> list[str]:
-    line = line.strip()
+    line = line.strip().replace("\\", "/")
     if SHELL_META.search(line):
         raise ValueError("shell metacharacters are not allowed")
     parts = shlex.split(line, posix=True)
     if len(parts) < 2 or parts[0] != "screen":
         raise ValueError("only `screen <run|explain|eval|repro|summary> ...` is allowed")
-    if parts[1] not in ALLOWED_SUBCOMMANDS and parts[1] not in ("--help", "-h", "--version"):
+    sub, args = parts[1], parts[2:]
+    if sub not in ALLOWED_SUBCOMMANDS and sub not in ("--help", "-h", "--version"):
         raise ValueError(f"subcommand must be one of {sorted(ALLOWED_SUBCOMMANDS)}")
-    return [sys.executable, str(SYSTEM / "screen.py"), *parts[1:]]
+    helping = any(a in ("-h", "--help") for a in args)
+    if sub in DATA_SUBCOMMANDS and not helping:
+        if not any(a == "--data" or a.startswith("--data=") for a in args):
+            args += ["--data", DATA_DIR.as_posix()]
+        if sub == "repro":
+            for i, a in enumerate(args):
+                if a == "--out-dir" and i + 1 < len(args):
+                    _check_writable(args[i + 1])
+                elif a.startswith("--out-dir="):
+                    _check_writable(a.split("=", 1)[1])
+    if sub == "run" and not helping:
+        positional, i = [], 0
+        while i < len(args):
+            a = args[i]
+            if a == "--trace":
+                if i + 1 < len(args):
+                    _check_writable(args[i + 1])
+                i += 2
+                continue
+            if a.startswith("--trace="):
+                _check_writable(a.split("=", 1)[1])
+            elif not a.startswith("-"):
+                positional.append(a)
+            i += 1
+        if not positional:  # `screen run` -> server data, default output file
+            args = [DATA_DIR.as_posix(), "output/terminal_run.jsonl", *args]
+        elif len(positional) == 1:  # `screen run out.jsonl`
+            args = [DATA_DIR.as_posix(), *args]
+        out = positional[-1] if len(positional) >= 1 else "output/terminal_run.jsonl"
+        _check_writable(out)
+    return [sys.executable, str(SYSTEM / "screen.py"), sub, *args]
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":  # repro spawns child processes; kill the whole tree
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
+    else:
+        proc.kill()
+
+
+async def _run_streaming(ws: WebSocket, argv: list[str], recv: asyncio.Future) -> asyncio.Future:
+    """Stream a command's output; Ctrl+C (\\x03) from the client or the timeout kills it.
+
+    Uses a thread + Popen (works on any Windows event loop). Returns the pending receive future.
+    """
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[str | None] = asyncio.Queue()
+    proc = subprocess.Popen(
+        argv, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        env={**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"},
+    )
+
+    def pump() -> None:
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            loop.call_soon_threadsafe(queue.put_nowait, raw.decode("utf-8", "replace"))
+        loop.call_soon_threadsafe(queue.put_nowait, None)
+
+    threading.Thread(target=pump, daemon=True).start()
+    deadline = loop.time() + COMMAND_TIMEOUT
+    stopped: str | None = None
+    try:
+        while True:
+            get = asyncio.ensure_future(queue.get())
+            wait_for = {get} if stopped else {get, recv}
+            timeout = None if stopped else max(0.0, deadline - loop.time())
+            done, _ = await asyncio.wait(wait_for, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+            if get in done:
+                item = get.result()
+                if item is None:
+                    break
+                await ws.send_text(item.rstrip("\r\n") + "\r\n")
+                continue
+            get.cancel()
+            if recv in done:
+                msg = recv.result()  # raises WebSocketDisconnect if the client left
+                recv = asyncio.ensure_future(ws.receive_text())
+                if msg == "\x03":
+                    stopped = "cancelled (Ctrl+C)"
+                    await asyncio.to_thread(_kill_tree, proc)
+                continue
+            stopped = f"timed out after {int(COMMAND_TIMEOUT)}s - killed"
+            await asyncio.to_thread(_kill_tree, proc)
+    except BaseException:
+        await asyncio.to_thread(_kill_tree, proc)
+        raise
+    code = await asyncio.to_thread(proc.wait)
+    if stopped:
+        await ws.send_text(f"\x1b[33m[{stopped}]\x1b[0m\r\n")
+    await ws.send_text(f"\x1b[2m[exit {code}]\x1b[0m\r\n\x00done\r\n")
+    return recv
 
 
 @app.websocket("/api/terminal")
 async def terminal(ws: WebSocket) -> None:
     await ws.accept()
-    await ws.send_text(f"screening engine {__version__} - data: {DATA_DIR}\r\n"
-                       "allowed: screen run|explain|eval|repro|summary ...\r\n")
+    await ws.send_text(f"screening engine {__version__} - data: {DATA_DIR.as_posix()}\r\n"
+                       "allowed: screen run|explain|eval|repro|summary ...  (--data defaults to the server's data;"
+                       f" Ctrl+C stops; {int(COMMAND_TIMEOUT)}s limit)\r\n")
+    recv: asyncio.Future = asyncio.ensure_future(ws.receive_text())
     try:
         while True:
-            line = await ws.receive_text()
-            if not line.strip():
+            line = await recv
+            recv = asyncio.ensure_future(ws.receive_text())
+            if line == "\x03" or not line.strip():
                 await ws.send_text("\x00done\r\n")
                 continue
             try:
@@ -258,18 +574,13 @@ async def terminal(ws: WebSocket) -> None:
             except ValueError as exc:
                 await ws.send_text(f"\x1b[31mrejected: {exc}\x1b[0m\r\n\x00done\r\n")
                 continue
-            proc = await asyncio.create_subprocess_exec(
-                *argv, cwd=str(ROOT),
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-                env={**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"},
-            )
-            assert proc.stdout is not None
-            async for raw in proc.stdout:
-                await ws.send_text(raw.decode("utf-8", "replace").rstrip("\r\n") + "\r\n")
-            code = await proc.wait()
-            await ws.send_text(f"\x1b[2m[exit {code}]\x1b[0m\r\n\x00done\r\n")
+            shown = " ".join(argv[2:])
+            await ws.send_text(f"\x1b[2m> screen {shown}\x1b[0m\r\n")
+            recv = await _run_streaming(ws, argv, recv)
     except WebSocketDisconnect:
         return
+    finally:
+        recv.cancel()
 
 
 if DIST.is_dir():
