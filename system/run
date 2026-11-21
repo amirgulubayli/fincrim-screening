@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Scored entry point required by the brief:  system/run <data folder> <output file>
+# Standard library Python 3 only. Reads only <data folder>. Writes one JSON line per hit.
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PY="${PYTHON:-python3}"
+command -v "$PY" >/dev/null 2>&1 || PY=python
+exec "$PY" "$HERE/screen.py" run "$1" "$2"

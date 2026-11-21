@@ -1,0 +1,33 @@
+# ---- DATA: never commit (brief: "Do not commit dev/"; repo goes public) ----
+data/*
+!data/README.md
+*.xlsx
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Node
+node_modules/
+app/web/dist/
+
+# Local outputs (output/dev.jsonl IS committed for submission)
+output/*
+!output/dev.jsonl
+!output/README.md
+out/
+
+# Local agent / editor state
+.claude/settings.local.json
+.claude/worktrees/
+.grok/sessions/
+.DS_Store
+Thumbs.db
+.idea/
