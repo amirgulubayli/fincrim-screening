@@ -297,25 +297,24 @@ thead th { font-size: 12px; color: var(--muted); font-weight: 600; background: v
 .engines .grow-text { flex: 1 1 260px; }
 .engines-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .engine-col { background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 12px 14px; min-width: 0; }
-.engine-col.core { border-top: 3px solid var(--accent); }
-.engine-col.check { border-top: 3px solid var(--line-strong); }
+.engine-col.core .engine-title { color: var(--accent); }
 .engine-title { font-weight: 650; margin-bottom: 6px; }
 .ev-verdict { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
 .engine-reason { margin: 6px 0 8px; font-size: 13px; }
 .facet-list { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 6px; }
-.facet-list > li { display: block; padding: 6px 8px; background: var(--sunk); border-radius: 6px; border-left: 3px solid var(--line-strong); color: var(--text); }
-.facet-list > li.sig-agreement { border-left-color: var(--same); }
-.facet-list > li.sig-contradiction { border-left-color: var(--diff); }
+.facet-list > li { display: block; padding: 6px 8px; background: var(--sunk); border-radius: 6px; color: var(--text); }
+.facet-list > li.sig-agreement > .sig { color: var(--same); }
+.facet-list > li.sig-contradiction > .sig { color: var(--diff); }
 .facet-list > li > .sig { font-size: 10.5px; text-transform: uppercase; font-weight: 700; margin-right: 6px; }
 .facet-list > li > .weak-tag { margin-left: 6px; }
-.reviewer-callout { margin: 10px 0 4px; padding: 10px 14px; background: var(--conflict-bg); border: 1px solid #f9dbaf; border-left: 4px solid var(--conflict); border-radius: 7px; }
+.reviewer-callout { margin: 10px 0 4px; padding: 10px 14px; background: var(--conflict-bg); border: 1px solid #f9dbaf; border-radius: 7px; }
 .reviewer-callout .rc-head { font-size: 11.5px; font-weight: 750; text-transform: uppercase; letter-spacing: .06em; color: var(--conflict); }
 .reviewer-callout p { margin: 4px 0; font-weight: 550; font-size: 14px; }
 .loading-screen { flex: 1; display: grid; place-items: center; padding: 24px 16px; }
 .loading-card { max-width: 520px; width: 100%; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 20px 22px; display: grid; gap: 10px; }
 .progress { height: 8px; background: var(--sunk); border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
-.progress > span { display: block; height: 100%; background: var(--accent); transition: width .6s ease; }
+.progress > span { display: block; height: 100%; background: var(--accent); }
 .progress > span.indet { animation: indet 1.4s ease-in-out infinite alternate; }
-@keyframes indet { from { margin-left: 0; } to { margin-left: 92%; } }
+@keyframes indet { from { transform: translateX(0); } to { transform: translateX(1100%); } }
 @media (prefers-reduced-motion: reduce) { .progress > span, .progress > span.indet { transition: none; animation: none; } }
 @media (max-width: 900px) { .engines-grid { grid-template-columns: 1fr; } }
