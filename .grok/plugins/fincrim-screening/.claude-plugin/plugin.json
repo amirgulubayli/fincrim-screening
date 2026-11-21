@@ -1,0 +1,10 @@
+{
+  "name": "fincrim-screening",
+  "version": "0.1.0",
+  "description": "Explainable sanctions-screening adjudication for Grok: read-only MCP tools over the deterministic engine (summary, run, explain, review queue, eval, repro), a morning health-check skill and a compliance-analyst explain skill. The engine decides; Grok only narrates.",
+  "author": {
+    "name": "fincrim-screening team"
+  },
+  "repository": "https://github.com/amirgulubayli/fincrim-screening",
+  "keywords": ["sanctions", "screening", "compliance", "aml", "explainability", "mcp"]
+}
