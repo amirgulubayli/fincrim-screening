@@ -6,12 +6,22 @@ This wrapper only runs it in-process and indexes its decisions by hit id; the re
 `screening` (modular rules, compiler, triage, explain) treats it as the authoritative
 first opinion and adds an independent second check, tiers and a facet trace.
 
-To update the core: re-copy the file from contrib/, then run
-`python system/screen.py eval` and `repro --runs 5` (0 unsafe clearances, identical).
+To update the core: re-copy the file from contrib/, re-apply the [team patch] blocks
+(grep "team patch"), then run `python system/screen.py eval` and `repro --runs 5`.
+
+Team patches on top of the verbatim engine (each marked "[team patch]" in aml_engine.py):
+  1. Names.parts / Names.agree memoised: pure functions, no decision change; unreadable
+     screened DOBs no longer make unlinked-alert search 15x slower (stress test).
+  2. Labelled "DOB: ..." lines anywhere in the first profile paragraph are read (SOP P5);
+     an unreadable one blocks DOB/temporal clearances.
+Safety valve: SCREEN_DEADLINE_S (default 1200 s). Past it, remaining hits are answered
+REVIEW so a run always finishes inside the 30-minute limit (never fires on dev: ~60 s).
 """
 
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +37,7 @@ def run_core(folder: str | Path) -> dict[str, dict[str, Any]]:
     second_check) but returns results instead of writing a file.
     """
     folder = str(folder)
+    deadline = time.monotonic() + float(os.environ.get("SCREEN_DEADLINE_S", "1200"))
     E.LOAD_WARNINGS.clear()
     try:
         D = E.Data(folder)
@@ -54,6 +65,9 @@ def run_core(folder: str | Path) -> dict[str, dict[str, Any]]:
                 continue
             if err:
                 out[hid] = E.error_review(hid, alert["alert_id"], err)
+                continue
+            if time.monotonic() > deadline:
+                out[hid] = E.error_review(hid, alert["alert_id"], "time budget reached")
                 continue
             try:
                 r = E.decide(D, alert, hit, persons, how)

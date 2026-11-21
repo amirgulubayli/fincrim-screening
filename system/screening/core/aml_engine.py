@@ -339,8 +339,19 @@ class Names:
                 self.group.setdefault(fold(n), set()).add(gi)
                 self.members.setdefault(gi, []).append(fold(n))
         self.legal = {fold(x) for x in variants.get("company_legal_forms", [])}
+        # [team patch] memoise the two pure hot paths: unlinked-alert search calls them for every
+        # customer, and an unreadable screened DOB removes the year prefilter (95 s -> 1,546 s seen
+        # in the stress test). Same inputs -> same outputs, so decisions cannot change.
+        self._parts_cache, self._agree_cache = {}, {}
 
     def parts(self, name, company=False):
+        key = (name, company)
+        got = self._parts_cache.get(key)
+        if got is None:
+            got = self._parts_cache[key] = self._parts_uncached(name, company)
+        return list(got)
+
+    def _parts_uncached(self, name, company=False):
         s = fold(name)
         s = re.sub(r"\(.*?\)|\[.*?\]", " ", s)
         toks = re.split(r"[^a-z0-9/]+", s.replace("'", "").replace("’", ""))
@@ -392,6 +403,12 @@ class Names:
         return False
 
     def agree(self, n1, n2, company=False):
+        key = (n1, n2, company)
+        if key not in self._agree_cache:
+            self._agree_cache[key] = self._agree_uncached(n1, n2, company)
+        return self._agree_cache[key]
+
+    def _agree_uncached(self, n1, n2, company=False):
         p1, p2 = self.parts(n1, company), self.parts(n2, company)
         if not p1 or not p2:
             return False
@@ -751,6 +768,19 @@ def hit_profile(D, h):
     dobs = [d for d in (parse_date(x, "year") for x in as_list(h.get("dobs"))) if d]
     dob_src, dob_ev = ("dobs field", []) if dobs else (None, [])
     notes = h.get("profile_notes") or ""
+    dob_line_unparsed = []
+    if not dobs and h.get("entity_type") != "Company":
+        # [team patch] SOP P5: a DOB stated anywhere in the FIRST PARAGRAPH counts, including
+        # labelled lines such as "DOB: 6/20/1955" lower in that paragraph (H-2C6B2E). An unreadable
+        # labelled DOB is recorded as unparsed, which blocks DOB/temporal clearances (fail-safe).
+        para = notes.strip().split("\n\n")[0]
+        lm = re.search(r"(?im)^[ \t]*(?:DOB|D\.O\.B\.?|Date of birth|Birth ?date)[ \t]*[:\-][ \t]*(\S.*?)[ \t]*$", para)
+        if lm:
+            ld = parse_date(lm.group(1), "year")
+            if ld:
+                dobs, dob_src = [ld], "profile notes"
+            else:
+                dob_line_unparsed.append(lm.group(1))
     if not dobs and h.get("entity_type") != "Company":
         first = notes.strip().split("\n\n")[0].split("\n")[0]
         bm = re.search(r"\bborn (?:on |in )?(" + DATE_RE + r"|\d{4})", first)
@@ -786,7 +816,7 @@ def hit_profile(D, h):
     business_only = bool(csrc) and all(v == {"business address"} for v in csrc.values())
     return {"names": names, "dobs": dobs, "dob_src": dob_src, "dob_ev": dob_ev, "countries": countries,
             "business_only": business_only, "unknown_countries": unknown,
-            "dob_unparsed": [x for x in as_list(h.get("dobs")) if x and not parse_date(x, "year")],
+            "dob_unparsed": [x for x in as_list(h.get("dobs")) if x and not parse_date(x, "year")] + dob_line_unparsed,
             "deceased": parse_date(h.get("deceased_date"), "year"), "entity_type": h.get("entity_type"),
             "earliest_report": min(reports) if reports else None}
 
