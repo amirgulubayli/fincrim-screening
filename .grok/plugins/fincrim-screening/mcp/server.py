@@ -380,6 +380,46 @@ def screen_repro(args: dict[str, Any]) -> dict[str, Any]:
     return {"data": str(path), "exit_code": proc.returncode, **report}
 
 
+# ------------------------------------------------------------------ launch the dashboard (tools/launch.py)
+
+def _launch(*cmd: str, timeout: int = 900) -> dict[str, Any]:
+    """Run tools/launch.py (stdlib) and return its JSON. The dashboard embeds the CLI terminal."""
+    import subprocess
+
+    repo = find_repo()
+    proc = subprocess.run([sys.executable, str(repo / "tools" / "launch.py"), *cmd, "--json"],
+                          cwd=repo, capture_output=True, text=True, timeout=timeout)
+    out = proc.stdout.strip()
+    try:
+        start = out.index("{")
+        return json.loads(out[start:])
+    except ValueError as exc:
+        raise ToolError(f"launch.py {' '.join(cmd)} failed: {(proc.stderr or out)[-800:]}") from exc
+
+
+def dashboard_up(args: dict[str, Any]) -> dict[str, Any]:
+    cmd = ["up", "--port", str(_int(args.get("port"), 8000, 1024, 65535))]
+    if args.get("data"):
+        cmd += ["--data", str(args["data"])]
+    if args.get("xlsx"):
+        cmd += ["--xlsx", str(args["xlsx"])]
+    if args.get("wait") is False:
+        cmd.append("--no-wait")
+    return _launch(*cmd)
+
+
+def dashboard_status(args: dict[str, Any]) -> dict[str, Any]:
+    return _launch("status", timeout=60)
+
+
+def dashboard_down(args: dict[str, Any]) -> dict[str, Any]:
+    return _launch("down", timeout=60)
+
+
+def doctor(args: dict[str, Any]) -> dict[str, Any]:
+    return _launch("doctor", timeout=60)
+
+
 def _int(value: Any, default: int, lo: int, hi: int) -> int:
     if value is None or value == "":
         return default
@@ -461,6 +501,29 @@ TOOLS: dict[str, tuple[Any, dict[str, Any]]] = {
                        "unstable hits.",
         "inputSchema": {"type": "object", "properties": {
             "runs": {"type": "integer", "minimum": 2, "maximum": 10, "default": 5}, **DATA_PROP}},
+    }),
+    "dashboard_up": (dashboard_up, {
+        "description": "Start the whole system for a human: installs deps if needed, builds the review "
+                       "dashboard, starts the engine + dashboard server (the UI has the CLI embedded as a "
+                       "terminal) and waits until every hit is screened (~2 min on dev). Returns the URL to "
+                       "share. Idempotent: if already running, returns the existing URL.",
+        "inputSchema": {"type": "object", "properties": {
+            "port": {"type": "integer", "default": 8000},
+            "xlsx": {"type": "string", "description": "Optional browse workbook to rebuild data/dev if missing."},
+            "wait": {"type": "boolean", "default": True},
+            **DATA_PROP}},
+    }),
+    "dashboard_status": (dashboard_status, {
+        "description": "Is the dashboard running and ready? Returns url, readiness stage and log path.",
+        "inputSchema": {"type": "object", "properties": {}},
+    }),
+    "dashboard_down": (dashboard_down, {
+        "description": "Stop the dashboard server started by dashboard_up.",
+        "inputSchema": {"type": "object", "properties": {}},
+    }),
+    "doctor": (doctor, {
+        "description": "Check prerequisites on this machine (python 3.10+, uv, npm, gh, grok).",
+        "inputSchema": {"type": "object", "properties": {}},
     }),
 }
 
