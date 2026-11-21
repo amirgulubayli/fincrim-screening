@@ -12,9 +12,17 @@ partial date. Companies: only the `dobs` field counts (engine plan R14).
   at least one birth date, EVERY one is contradicted (years more than 1 apart, or
   the same year with differing month/day), no hit DOB was left unread (an unparsed
   `dobs` value or profile-note sentence), and every customer DOB agrees on that.
+  Head of Financial Crime policy: "every customer DOB" means EVERY date of birth
+  the bank holds for the person - the verified one, every other approved identity
+  check and every customer record - and a DOB that is present but unreadable
+  anywhere on the person blocks the clearance.
 * AGREEMENT when one hit birth date agrees (P7): the customer's year is one of its
-  possible years and every part both give is equal.
+  possible years and every part both give is equal. A partial DOB (year only, or
+  year + month) agrees too: name + partial DOB confirms (HoFC policy call 1).
 * NEUTRAL otherwise, with a sentence saying what was compared or missing.
+
+Ages inside news-report paragraphs ("According to <source>; <date>: ...") are
+ignored (HoFC policy call 8): the subject of a news age is unreliable.
 
 Guards from the engine plan: R1 (slash dates are day-first, unparseable values
 abstain), R2 (unknown parts stay unknown), R3 (an age gives two years, a clear
@@ -27,14 +35,47 @@ Pure, deterministic, never raises (any error -> []).
 
 from __future__ import annotations
 
+import re
+
 from ..contracts import Facet, ReasonCode, RuleResult, Signal
-from ..facts import WEAK_SEARCH_RESULT
+from ..facts import WEAK_SEARCH_RESULT, first_paragraph
 from ..normalize.dates import PartialDate, dates_agree, dates_contradict, parse_date
 from .base import Context, is_company
 
 RULE_ID = "P6.dob"
 
 _SOURCE_ORDER = ("dobs", "profile_notes", "search_result")
+_NEWS_REPORT = re.compile(r"^\s*According to\b")
+
+
+def _all_held_dobs(person, primary) -> list[tuple[PartialDate | None, str, str]]:
+    """Every DOB the bank holds for the person: the primary list first, then every
+    approved identity check and every customer record (HoFC: a clearance must hold
+    against all of them). Entries are (date or None if unreadable, source id, raw)."""
+    out = list(primary)
+    seen = {(sid, str(d) if d else raw) for d, sid, raw in out}
+
+    def add(date, sid, raw):
+        key = (sid, str(date) if date else raw)
+        if key not in seen:
+            seen.add(key)
+            out.append((date, sid, raw))
+
+    for ident in getattr(person, "identities", ()) or ():
+        raw = (getattr(ident, "dob_raw", None) or "").strip()
+        date = getattr(ident, "dob", None)
+        if not isinstance(date, PartialDate):
+            date = parse_date(raw) if raw else None
+        if date is not None or raw:
+            add(date, getattr(ident, "source_id", "") or "", raw or str(date))
+    for date, sid, raw in _record_dobs(person):
+        add(date, sid, raw)
+    return out
+
+
+def _news_age(cand) -> bool:
+    """An age-derived birth year read from a news-report sentence."""
+    return bool(cand.from_age) and bool(_NEWS_REPORT.match(cand.raw or ""))
 
 
 # ------------------------------------------------------------------ customer side
@@ -163,6 +204,12 @@ def _check(ctx: Context) -> list[RuleResult]:
     noun = "incorporation date" if company else "date of birth"
 
     cands = [c for c in facts.dob_candidates if not company or c.source == "dobs"]
+    # HoFC call 8: ages inside news-report paragraphs are ignored.
+    report = _NEWS_REPORT.match(first_paragraph(getattr(ctx.hit, "profile_notes", None)) or "")
+    cands = [
+        c for c in cands
+        if not _news_age(c) and not (report and c.source == "profile_notes" and c.from_age)
+    ]
     # R4: search results only when the hit gives no other birth date.
     if any(c.source != "search_result" for c in cands):
         cands = [c for c in cands if c.source != "search_result"]
@@ -221,11 +268,13 @@ def _check(ctx: Context) -> list[RuleResult]:
             weak=weak,
         )
 
+    held = _all_held_dobs(person, cust)
+    held_unreadable = [(sid, raw) for d, sid, raw in held if d is None]
     all_contradicted = (
         may_clear
-        and len(readable) == len(cust)
+        and not held_unreadable
         and not unreadable_hit
-        and all(_cand_contradicted(d, c) for d, _s, _r in readable for c in known)
+        and all(_cand_contradicted(d, c) for d, _s, _r in held for c in known)
     )
     if all_contradicted:
         by_source: dict[str, list] = {}
@@ -247,10 +296,15 @@ def _check(ctx: Context) -> list[RuleResult]:
 
     if unreadable_hit:
         why = f"part of the hit's birth information ({unreadable_hit[0]!r}) could not be read"
-    elif len(readable) != len(cust):
-        why = "one of the customer's dates of birth could not be read"
+    elif held_unreadable:
+        sid, raw = held_unreadable[0]
+        why = f"one of the customer's dates of birth ({raw!r}, {sid}) could not be read"
     elif not may_clear:
         why = "the customer's verified identity is not available, so the date cannot clear the hit"
+    elif any(
+        not _cand_contradicted(d, c) for d, _s, _r in held[len(readable):] for c in known
+    ):
+        why = "another date of birth the bank holds for the customer does not contradict the hit's"
     else:
         why = "the dates are too close to call (one year apart) or the customer's records disagree"
     return _result(
