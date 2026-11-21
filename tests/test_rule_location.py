@@ -228,6 +228,17 @@ def test_location_only_contradiction_with_name_and_dob_agreement_is_review():
     assert v.decision is Decision.REVIEW
 
 
+def test_birth_year_that_may_agree_blocks_location_clear():
+    hit = make_hit(countries=["Canada"], dobs=["1994", "1995"])
+    person = new_person(claim("United States"))
+    person.verified_dob = "25 January 1995"
+    r = only(run(person, hit))
+    assert r.signal is Signal.NEUTRAL
+    assert "1995" in r.summary
+    person.verified_dob = "1990-03-01"  # more than a year away -> location may clear
+    assert only(run(person, hit)).signal is Signal.CONTRADICTION
+
+
 def test_never_raises_on_messy_person():
     assert run(SimpleNamespace(countries=[object(), None], record_ids=None)) == []
 

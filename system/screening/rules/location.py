@@ -14,7 +14,9 @@ Safety (engine plan R5-R7):
   * no resolved customer -> never a contradiction; a weak agreement from the
     screened country is allowed (COUNTRY_FROM_SCREENED_ONLY).
   * the compiler turns a location-only contradiction into REVIEW when name and
-    DOB agree; that is not repeated here.
+    DOB agree. As a safety net (the P6.dob rule may abstain), the contradiction
+    is also withheld whenever the customer's birth year is one of the hit's
+    possible birth years (R6).
 
 The customer's country claims come from Person.countries (CountryClaim: raw,
 source_id, kind) when the resolver provides them; otherwise they are rebuilt
@@ -25,6 +27,7 @@ from __future__ import annotations
 
 from ..contracts import Facet, ReasonCode, RuleResult, Signal
 from ..normalize.countries import classify_country, countries_in_text
+from ..normalize.dates import parse_date
 from .base import Context
 
 RULE_ID = "P6.location"
@@ -119,6 +122,36 @@ def _classify_hit(ctx: Context) -> tuple[set[str], list[str]]:
     return found, unreadable
 
 
+# ------------------------------------------------------------ R6 safety net
+
+
+def _shared_birth_years(ctx: Context) -> list[int]:
+    """Birth years the customer and the hit could share (over-inclusive on purpose).
+
+    SOP P6: a country difference does not clear a hit whose name and DOB agree.
+    The compiler enforces that from the P6.dob agreement, but only when that rule
+    speaks; this keeps a location clear from slipping through while it does not
+    (or cannot read a date). Any customer year (verified, record, screened) that is
+    one of the hit's possible birth years blocks the location contradiction:
+    abstaining only ever turns a clear into REVIEW.
+    """
+    hit_years: set[int] = set()
+    for cand in ctx.facts.dob_candidates or ():
+        hit_years.update(y for y in (cand.years or ()) if isinstance(y, int))
+    for raw in ctx.facts.dobs_raw or ():
+        parsed = parse_date(raw)
+        if parsed is not None:
+            hit_years.add(parsed.year)
+    if not hit_years:
+        return []
+    person = ctx.person
+    raws = [getattr(person, "verified_dob", None), ctx.alert.dob]
+    raws.extend(r.dob for r in getattr(person, "records", ()) or ())
+    raws.extend(k.verified_dob for k in getattr(person, "kyc", ()) or ())
+    cust_years = {d.year for d in (parse_date(r) for r in raws if r) if d is not None}
+    return sorted(cust_years & hit_years)
+
+
 # ---------------------------------------------------------------------- the check
 
 
@@ -180,6 +213,14 @@ def _check(ctx: Context) -> list[RuleResult]:
         return _neutral(
             f"Some country values could not be read ({_join(unread)}); they might be shared, "
             "so location cannot clear the hit."
+        )
+
+    shared_years = _shared_birth_years(ctx)
+    if shared_years:
+        return _neutral(
+            f"The countries differ ({_join(sorted(cust_set))} vs {_join(sorted(hit_set))}), but the "
+            f"customer's birth year {_join([str(y) for y in shared_years])} fits the hit's, and a country "
+            "difference does not clear a hit whose date of birth may agree."
         )
 
     # Disjoint, complete, readable on both sides -> contradiction.
