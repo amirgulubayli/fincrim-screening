@@ -163,7 +163,7 @@ def comment(number: int, body: str) -> None:
 
 
 def print_table(rows: list[list[str]], headers: list[str]) -> None:
-    widths = [max(len(str(x)) for x in col) for col in zip(headers, *rows)]
+    widths = [max(len(str(x)) for x in col) for col in zip(headers, *rows, strict=False)]
     widths[-1] = min(widths[-1], 80)
     fmt = "  ".join(f"{{:<{w}}}" for w in widths)
     print(fmt.format(*headers))
@@ -289,7 +289,9 @@ def _run_checks() -> str:
     py = sys.executable
     if (REPO_ROOT / "tests").is_dir():
         print("Running pytest ...")
-        p = run([py, "-m", "pytest", "-q"], check=False, capture=False)
+        # Prefer the project env (uv) so a broken/missing global pytest doesn't matter.
+        cmd = ["uv", "run", "pytest", "-q"] if shutil.which("uv") else [py, "-m", "pytest", "-q"]
+        p = run(cmd, check=False, capture=False)
         if p.returncode != 0:
             raise TaskError("pytest failed; fix tests before `done` (or use --skip-checks).")
     if (REPO_ROOT / "data" / "dev").is_dir() and (REPO_ROOT / "system" / "screen.py").is_file():

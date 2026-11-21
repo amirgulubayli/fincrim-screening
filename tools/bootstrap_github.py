@@ -56,7 +56,7 @@ def gh(args: list[str], check: bool = True) -> subprocess.CompletedProcess:
     if shutil.which("gh") is None:
         raise BootstrapError("`gh` not found on PATH. Install GitHub CLI: https://cli.github.com")
     p = subprocess.run(["gh", *args], cwd=REPO_ROOT, text=True, encoding="utf-8", errors="replace",
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                       capture_output=True)
     if check and p.returncode != 0:
         raise BootstrapError(f"gh {' '.join(args)} failed:\n{(p.stderr or p.stdout).strip()}")
     return p
