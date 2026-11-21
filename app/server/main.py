@@ -573,6 +573,47 @@ def repro_start() -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------ terminal
+#
+# One command line at a time over a WebSocket. Only `screen <whitelisted subcommand> ...` runs, as argv
+# without a shell, with a timeout and Ctrl+C. Commands run with SCREEN_COLOR=1 and unbuffered output so the
+# CLI's colour case cards and live progress line stream to xterm.js. `explain` answers in-process from the
+# already loaded engine run (same cli.explain_hit + cli.render_explain the CLI uses); run / eval / repro /
+# diff / queue / summary / policy are always the real CLI subprocess (they are the proof).
+
+TERMINAL_ENV = {"SCREEN_COLOR": "1", "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8", "SCREEN_WIDTH": "100"}
+TERMINAL_FLAGS: dict[str, list[str]] = {
+    "summary": ["--json"],
+    "explain": ["--engine", "--json"],
+    "eval": ["--compare", "--engine", "--pred", "--verbose", "--json"],
+    "diff": ["--pair", "--json"],
+    "queue": ["--tier", "--limit", "--engine", "--json"],
+    "policy": ["--json"],
+    "run": ["--trace", "--engine", "--quiet", "--json"],
+    "repro": ["--runs", "--engine", "--out-dir", "--json"],
+}
+TERMINAL_HELP = (
+    ("summary", "", "dataset + decision counts"),
+    ("explain", "<HIT>", "case card: verdict, why, core vs check, rule trace, evidence (instant)"),
+    ("eval", "[--compare]", "score against the practice labels; --compare: core vs check vs combined"),
+    ("diff", "[--pair D:R]", "where the decision core and the independent check disagree"),
+    ("queue", "--tier T [--limit N]", "analyst queue for one tier, one-line why per hit"),
+    ("policy", "[ID ...]", "the policy registry (SOP P1-P9, HOFC-1..9, DC-1..3)"),
+    ("run", "[OUT]", "decide every hit, write the submission JSONL (under output/ or out/)"),
+    ("repro", "[--runs N]", "N fresh processes with different hash seeds: byte-identical?"),
+)
+DEMO_COMMANDS = [
+    "screen summary",
+    "screen eval --compare",
+    "screen repro --runs 5",
+    "screen diff",
+    "screen explain H-58A39C",
+    "screen explain H-4D76E3",
+    "screen explain H-B1018D",
+    "screen explain H-373F2A",
+    "screen queue --tier BORDERLINE --limit 5",
+    "screen policy",
+]
+REPRO_SECONDS_PER_RUN = 110
 
 
 def _check_writable(value: str) -> str:
@@ -588,8 +629,11 @@ def parse_command(line: str) -> list[str]:
     if SHELL_META.search(line):
         raise ValueError("shell metacharacters are not allowed")
     parts = shlex.split(line, posix=True)
+    if parts and parts[0] in ALLOWED_SUBCOMMANDS:  # `explain H-1` == `screen explain H-1`
+        parts.insert(0, "screen")
     if len(parts) < 2 or parts[0] != "screen":
-        raise ValueError("only `screen <" + "|".join(sorted(ALLOWED_SUBCOMMANDS)) + "> ...` is allowed")
+        raise ValueError("only `screen <" + "|".join(sorted(ALLOWED_SUBCOMMANDS)) + "> ...` is allowed"
+                         " (type `help`)")
     sub, args = parts[1], parts[2:]
     if sub not in ALLOWED_SUBCOMMANDS and sub not in ("--help", "-h", "--version"):
         raise ValueError(f"subcommand must be one of {sorted(ALLOWED_SUBCOMMANDS)}")
@@ -614,6 +658,9 @@ def parse_command(line: str) -> list[str]:
                 continue
             if a.startswith("--trace="):
                 _check_writable(a.split("=", 1)[1])
+            elif a == "--engine":
+                i += 2
+                continue
             elif not a.startswith("-"):
                 positional.append(a)
             i += 1
@@ -626,6 +673,92 @@ def parse_command(line: str) -> list[str]:
     return [sys.executable, str(SYSTEM / "screen.py"), sub, *args]
 
 
+def command_timeout(argv: list[str]) -> float:
+    """repro runs N full engine passes in fresh processes; give it room (still bounded)."""
+    if len(argv) > 2 and argv[2] == "repro":
+        runs = 5
+        for i, a in enumerate(argv):
+            try:
+                if a == "--runs" and i + 1 < len(argv):
+                    runs = int(argv[i + 1])
+                elif a.startswith("--runs="):
+                    runs = int(a.split("=", 1)[1])
+            except ValueError:
+                pass
+        return max(COMMAND_TIMEOUT, REPRO_SECONDS_PER_RUN * max(1, runs) + 60)
+    return COMMAND_TIMEOUT
+
+
+def fast_explain(argv: list[str], width: int = 100) -> tuple[str, int] | None:
+    """`screen explain HIT [--engine E] [--json]` answered from the loaded run, or None (use the CLI)."""
+    import argparse
+
+    from screening import cli as screen_cli
+    from screening.pipeline import ENGINES, engine_mode
+
+    ds = STATE.ds
+    if ds is None or not STATE.summary or len(argv) < 4 or argv[2] != "explain":
+        return None
+    p = argparse.ArgumentParser(add_help=False, exit_on_error=False)
+    p.add_argument("hit_id")
+    p.add_argument("--data")
+    p.add_argument("--engine", choices=ENGINES)
+    p.add_argument("--json", action="store_true")
+    try:
+        ns, extra = p.parse_known_args(argv[3:])
+    except (argparse.ArgumentError, SystemExit):
+        return None
+    if extra or (ns.data and Path(ns.data).expanduser().resolve() != DATA_DIR):
+        return None
+    hit_id = ns.hit_id if ns.hit_id in ds.hits else ns.hit_id.strip().upper()
+    if hit_id not in ds.hits:
+        return f"\x1b[31munknown hit {ns.hit_id}\x1b[0m  (Tab completes hit ids)", 2
+    x = screen_cli.explain_hit(ds, hit_id, ns.engine or engine_mode())
+    if ns.json:
+        return json.dumps(x, indent=2, ensure_ascii=False), 0
+    return screen_cli.render_explain(x, color=True, width=width), 0
+
+
+def terminal_help() -> str:
+    b, d, c, y, r = "\x1b[1m", "\x1b[90m", "\x1b[36m", "\x1b[33m", "\x1b[0m"
+    lines = [f" {b}screen{r} {d}- the deterministic screening CLI: the same code that produced this dashboard,"
+             f" no model, no network{r}", "", f" {b}{c}COMMANDS{r}"]
+    for sub, args, what in TERMINAL_HELP:
+        lines.append(f"   {b}screen {sub}{r} {c}{args:<22}{r} {d}{what}{r}")
+    lines += ["", f" {b}{c}OPTIONS{r}  --engine core|check|combined   --json   {d}(--data defaults to the server's data:"
+              f" {DATA_DIR.as_posix()}){r}",
+              f" {b}{c}KEYS{r}     Tab complete  {d}|{r}  Up/Down history  {d}|{r}  Ctrl+C stop  {d}|{r}  Ctrl+L clear"
+              f"  {d}|{r}  select to copy  {d}|{r}  {y}help{r}, {y}clear{r}",
+              f" {b}{c}TRY{r}      screen explain H-58A39C   {d}|{r}  screen eval --compare   {d}|{r}  screen diff"]
+    return "\r\n".join(lines) + "\r\n"
+
+
+def terminal_banner() -> str:
+    ready = STATE.ds is not None and bool(STATE.summary)
+    state = "\x1b[32minstant explain ready\x1b[0m" if ready else \
+        f"\x1b[33mengine loading ({STATE.stage}); explain uses the full CLI meanwhile\x1b[0m"
+    return f"\x1b[90mconnected - engine {__version__} - data {DATA_DIR.as_posix()} - \x1b[0m{state}\r\n"
+
+
+@app.get("/api/terminal/meta")
+def terminal_meta() -> dict[str, Any]:
+    """What the terminal UI needs for its title bar, demo chips and Tab completion."""
+    ready = STATE.ds is not None and bool(STATE.summary)
+    return {
+        "engine_version": __version__,
+        "data": DATA_DIR.as_posix(),
+        "ready": ready,
+        "status": "ready" if ready else STATE.status,
+        "subcommands": sorted(ALLOWED_SUBCOMMANDS),
+        "flags": TERMINAL_FLAGS,
+        "tiers": ["AUTO_CLEAR", "AUTO_ESCALATE", "BORDERLINE", "HUMAN_REVIEW"],
+        "engines": ["combined", "core", "check"],
+        "hit_ids": sorted(STATE.decisions) if ready else [],
+        "demo": DEMO_COMMANDS,
+        "timeout_seconds": int(COMMAND_TIMEOUT),
+    }
+
+
 def _kill_tree(proc: subprocess.Popen) -> None:
     if proc.poll() is not None:
         return
@@ -635,26 +768,49 @@ def _kill_tree(proc: subprocess.Popen) -> None:
         proc.kill()
 
 
-async def _run_streaming(ws: WebSocket, argv: list[str], recv: asyncio.Future) -> asyncio.Future:
-    """Stream a command's output; Ctrl+C (\\x03) from the client or the timeout kills it.
+def _crlf(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\n", "\r\n")
+
+
+def _exit_line(code: int | str, seconds: float) -> str:
+    color = "32" if code == 0 else "31"
+    return f"\x1b[90m[\x1b[{color}mexit {code}\x1b[90m - {seconds:.2f}s]\x1b[0m\r\n"
+
+
+async def _run_streaming(ws: WebSocket, argv: list[str], recv: asyncio.Future, width: int = 100) -> asyncio.Future:
+    """Stream a command's stdout + stderr as it is written (progress lines use \\r, so chunks, not
+    lines); Ctrl+C (\\x03) from the client or the timeout kills the process tree.
 
     Uses a thread + Popen (works on any Windows event loop). Returns the pending receive future.
     """
+    import codecs
+
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[str | None] = asyncio.Queue()
+    started = time.perf_counter()
     proc = subprocess.Popen(
-        argv, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        env={**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"},
+        argv, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+        env={**os.environ, **TERMINAL_ENV, "SCREEN_WIDTH": str(width)},
     )
 
     def pump() -> None:
         assert proc.stdout is not None
-        for raw in proc.stdout:
-            loop.call_soon_threadsafe(queue.put_nowait, raw.decode("utf-8", "replace"))
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        while True:
+            raw = proc.stdout.read1(65536)
+            if not raw:
+                break
+            text = decoder.decode(raw)
+            if text:
+                loop.call_soon_threadsafe(queue.put_nowait, text)
+        tail = decoder.decode(b"", final=True)
+        if tail:
+            loop.call_soon_threadsafe(queue.put_nowait, tail)
         loop.call_soon_threadsafe(queue.put_nowait, None)
 
     threading.Thread(target=pump, daemon=True).start()
-    deadline = loop.time() + COMMAND_TIMEOUT
+    limit = command_timeout(argv)
+    deadline = loop.time() + limit
     stopped: str | None = None
     try:
         while True:
@@ -666,42 +822,53 @@ async def _run_streaming(ws: WebSocket, argv: list[str], recv: asyncio.Future) -
                 item = get.result()
                 if item is None:
                     break
-                await ws.send_text(item.rstrip("\r\n") + "\r\n")
+                await ws.send_text(_crlf(item))
                 continue
             get.cancel()
             if recv in done:
                 msg = recv.result()  # raises WebSocketDisconnect if the client left
                 recv = asyncio.ensure_future(ws.receive_text())
                 if msg == "\x03":
-                    stopped = "cancelled (Ctrl+C)"
+                    stopped = "cancelled (Ctrl+C) - process tree killed"
                     await asyncio.to_thread(_kill_tree, proc)
                 continue
-            stopped = f"timed out after {int(COMMAND_TIMEOUT)}s - killed"
+            stopped = f"timed out after {int(limit)}s - killed"
             await asyncio.to_thread(_kill_tree, proc)
     except BaseException:
         await asyncio.to_thread(_kill_tree, proc)
         raise
     code = await asyncio.to_thread(proc.wait)
     if stopped:
-        await ws.send_text(f"\x1b[33m[{stopped}]\x1b[0m\r\n")
-    await ws.send_text(f"\x1b[2m[exit {code}]\x1b[0m\r\n\x00done\r\n")
+        await ws.send_text(f"\r\x1b[2K\x1b[33m[{stopped}]\x1b[0m\r\n")
+    await ws.send_text(_exit_line(code, time.perf_counter() - started) + "\x00done\r\n")
     return recv
 
 
 @app.websocket("/api/terminal")
 async def terminal(ws: WebSocket) -> None:
     await ws.accept()
-    await ws.send_text(f"screening engine {__version__} - data: {DATA_DIR.as_posix()}\r\n"
-                       "allowed: screen run|explain|eval|repro|summary|diff|queue|policy ...  (--engine, eval --compare;"
-                       " --data defaults to the server's data;"
-                       f" Ctrl+C stops; {int(COMMAND_TIMEOUT)}s limit)\r\n")
+    await ws.send_text(terminal_banner() + "\x00done\r\n")
     recv: asyncio.Future = asyncio.ensure_future(ws.receive_text())
+    width = 100  # the client reports its column count ("\x01cols:N"); case cards wrap to fit
     try:
         while True:
             line = await recv
             recv = asyncio.ensure_future(ws.receive_text())
-            if line == "\x03" or not line.strip():
+            if line.startswith("\x01cols:"):
+                try:
+                    width = max(60, min(100, int(line[6:]) - 1))
+                except ValueError:
+                    pass
+                continue
+            word = line.strip().lower()
+            if line == "\x03" or not word:
                 await ws.send_text("\x00done\r\n")
+                continue
+            if word in ("help", "screen help", "?", "screen --help", "screen -h"):
+                await ws.send_text(terminal_help() + "\x00done\r\n")
+                continue
+            if word in ("clear", "cls"):
+                await ws.send_text("\x1b[2J\x1b[3J\x1b[H\x00done\r\n")
                 continue
             try:
                 argv = parse_command(line)
@@ -709,8 +876,23 @@ async def terminal(ws: WebSocket) -> None:
                 await ws.send_text(f"\x1b[31mrejected: {exc}\x1b[0m\r\n\x00done\r\n")
                 continue
             shown = " ".join(argv[2:])
-            await ws.send_text(f"\x1b[2m> screen {shown}\x1b[0m\r\n")
-            recv = await _run_streaming(ws, argv, recv)
+            await ws.send_text(f"\x1b[90m> screen {shown}\x1b[0m\r\n")
+            t0 = time.perf_counter()
+            try:
+                fast = await asyncio.to_thread(fast_explain, argv, width)
+            except Exception as exc:  # noqa: BLE001 - fall back to the real CLI
+                fast = None
+                await ws.send_text(f"\x1b[90m(in-process explain failed: {type(exc).__name__}; running the CLI)"
+                                   f"\x1b[0m\r\n")
+            if fast is not None:
+                text, code = fast
+                took = time.perf_counter() - t0
+                note = (f"\x1b[90m(instant: {took:.2f}s from the server's loaded engine run; same explain_hit +"
+                        f" renderer as the CLI)\x1b[0m\r\n")
+                await ws.send_text(_crlf(text) + "\r\n" + (note if code == 0 else "") + _exit_line(code, took)
+                                   + "\x00done\r\n")
+                continue
+            recv = await _run_streaming(ws, argv, recv, width)
     except WebSocketDisconnect:
         return
     finally:

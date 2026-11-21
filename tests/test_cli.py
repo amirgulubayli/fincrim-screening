@@ -133,3 +133,110 @@ def test_reviewer_action_extraction():
          "Reviewer: compare the given names, date of birth and nationality against the listing. First-pass x.")
     assert reviewer_action(r) == "compare the given names, date of birth and nationality against the listing."
     assert reviewer_action("The hit is left for a person to review.") is None
+
+
+# --------------------------------------------------------------------------- colour / presentation
+
+
+@pytest.fixture
+def plain(monkeypatch):
+    for var in ("SCREEN_COLOR", "FORCE_COLOR", "NO_COLOR"):
+        monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture
+def color(monkeypatch, plain):
+    monkeypatch.setenv("SCREEN_COLOR", "1")
+
+
+def _out(capsys, argv, code=0):
+    assert main(argv) == code
+    return capsys.readouterr()
+
+
+def test_color_switch_env(monkeypatch, plain):
+    assert cli.color_enabled() is False  # pytest's captured stdout is not a TTY
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    assert cli.color_enabled() is True
+    monkeypatch.setenv("SCREEN_COLOR", "0")
+    assert cli.color_enabled() is False
+    monkeypatch.setenv("SCREEN_COLOR", "1")
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert cli.color_enabled() is True  # an explicit SCREEN_COLOR wins
+
+
+def test_explain_plain_output_is_unchanged_without_colour(capsys, plain):
+    out = _out(capsys, ["explain", "H-2", "--data", FIXTURE]).out
+    assert "\x1b[" not in out
+    lines = out.splitlines()
+    assert lines[0] == "H-2 (alert A-1) -> SAME_ENTITY / NAME_DOB_LOCATION_MATCH   [engine combined]"
+    assert lines[1] == "  tier: AUTO_ESCALATE   flags: -   agreement: AGREE"
+    assert lines[2].startswith("  customer: CUS-1   evidence: ")
+    assert any(line.startswith("  resolution: account_ref -> CUS-1") for line in lines)
+    assert lines[-1].startswith("  policies: P4 (Verified beats declared)")
+
+
+def test_explain_colour_case_card(capsys, color):
+    out = _out(capsys, ["explain", "H-2", "--data", FIXTURE]).out
+    assert "\x1b[" in out
+    text = cli.strip_ansi(out)
+    lines = [line.strip() for line in text.splitlines()]
+    assert lines[0].startswith("H-2  alert A-1") and lines[0].endswith("engine combined")
+    verdict = next(line for line in lines if line.startswith("●"))
+    assert "MATCH → compliance" in verdict and "SAME_ENTITY / NAME_DOB_LOCATION_MATCH" in verdict
+    assert "AUTO_ESCALATE" in verdict and "✓ AGREE" in verdict
+    for heading in ("WHY", "CORE vs CHECK", "RULE TRACE", "RESOLUTION PATH", "EVIDENCE", "POLICIES"):
+        assert any(line.startswith(heading) for line in lines), heading
+    assert any(line.startswith("├─ ✓ P6.dob") and "agreement" in line and "supports" in line for line in lines)
+    assert any(line.startswith("P7") and "Confirm only on agreement" in line for line in lines)
+    assert max(len(line) for line in text.splitlines()) <= 100
+
+
+def test_render_explain_matches_cli_colour_output(capsys, color, mini):
+    """The dashboard renders explain in-process from its loaded dataset: it must equal the CLI's output."""
+    from screening.loaders import load_dataset
+
+    out = _out(capsys, ["explain", "H-2", "--data", FIXTURE]).out
+    assert cli.explain_text(load_dataset(FIXTURE), "H-2", "combined") + "\n" == out
+    x = cli.explain_hit(mini, "H-2", "combined")
+    assert cli.strip_ansi(cli.render_explain(x)) == cli.render_explain(x, color=False)
+
+
+def test_json_output_identical_with_colour(capsys, monkeypatch, plain):
+    argvs = [["explain", "H-2", "--data", FIXTURE, "--json"], ["eval", "--data", FIXTURE, "--json"],
+             ["queue", "--tier", "AUTO_CLEAR", "--data", FIXTURE, "--json"], ["policy", "--json"],
+             ["diff", "--data", FIXTURE, "--json"]]
+    before = [_out(capsys, a) for a in argvs]
+    monkeypatch.setenv("SCREEN_COLOR", "1")
+    after = [_out(capsys, a) for a in argvs]
+    for b, a in zip(before, after, strict=True):
+        assert a.out == b.out and "\x1b[" not in a.out
+
+
+def test_run_files_unchanged_by_colour(capsys, monkeypatch, plain, tmp_path):
+    import hashlib
+
+    _out(capsys, ["run", FIXTURE, str(tmp_path / "plain.jsonl"), "--trace", str(tmp_path / "plain_t.jsonl")])
+    monkeypatch.setenv("SCREEN_COLOR", "1")
+    res = _out(capsys, ["run", FIXTURE, str(tmp_path / "color.jsonl"), "--trace", str(tmp_path / "color_t.jsonl")])
+    assert (tmp_path / "plain.jsonl").read_bytes() == (tmp_path / "color.jsonl").read_bytes()
+    assert (tmp_path / "plain_t.jsonl").read_bytes() == (tmp_path / "color_t.jsonl").read_bytes()
+    text = cli.strip_ansi(res.out)
+    assert "AUTO_CLEAR" in text and "HUMAN_REVIEW" in text and "sha256" in text
+    assert hashlib.sha256((tmp_path / "color.jsonl").read_bytes()).hexdigest()[:16] in text
+    assert "\x1b[" not in (tmp_path / "color.jsonl").read_text(encoding="utf-8")
+
+
+def test_run_plain_summary_unchanged(capsys, plain, tmp_path):
+    lines = _out(capsys, ["run", FIXTURE, str(tmp_path / "o.jsonl")]).out.splitlines()
+    assert "                            engine: combined" in lines
+    assert "                              hits: 3" in lines
+    assert not any("\x1b[" in line for line in lines)
+
+
+def test_eval_colour_scorecard(capsys, color):
+    text = cli.strip_ansi(_out(capsys, ["eval", "--data", FIXTURE]).out)
+    assert text.lstrip().startswith("SCORECARD")
+    assert "✓ no real match was ever cleared" in text and "decision score" in text
+    text = cli.strip_ansi(_out(capsys, ["eval", "--data", FIXTURE, "--compare"]).out)
+    assert "core vs check vs combined" in text and "✓ 0 unsafe clearances" in text

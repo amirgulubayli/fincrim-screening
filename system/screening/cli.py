@@ -15,6 +15,10 @@
 
 --engine core|check|combined (run/eval/explain/repro/diff/queue/stress) selects the engine; default is
 $SCREEN_ENGINE or combined. Add --json to any command for machine-readable output.
+
+Colour: on a terminal, or with SCREEN_COLOR=1 / FORCE_COLOR set, output is coloured (case cards, tier badges,
+live progress on stderr). SCREEN_COLOR=0 or NO_COLOR turns it off. --json output and the files `run` writes
+never change.
 """
 
 from __future__ import annotations
@@ -29,12 +33,15 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
+import threading
 import time
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
 from . import __version__
+from . import pipeline as _pipeline
 from .compiler import ENGINES_CONFLICT, ENGINES_DISAGREE, merge_with_core
 from .contracts import REASONS_BY_DECISION, Decision, HitDecision, ReasonCode, Signal, Tier
 from .evaluate import score
@@ -184,15 +191,469 @@ def _vs_core(signal: Signal, core: Decision | None) -> str:
     return "supports" if supports else "contradicts"
 
 
+# --------------------------------------------------------------------------- presentation (ANSI colour)
+#
+# Only the human-readable output is styled. --json output and the files `run` writes are never touched, and
+# without SCREEN_COLOR / FORCE_COLOR / a TTY the plain text below each command is exactly what it always was.
+
+BOLD, DIM, ITALIC = "1", "2", "3"
+RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, GREY = "31", "32", "33", "34", "35", "36", "90"
+BLACK, WHITE = "30", "97"
+BG_RED, BG_GREEN, BG_YELLOW, BG_BLUE = "41", "42", "43", "44"
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_ID_RE = re.compile(r"\b[A-Z]{1,5}-[0-9A-Z]{4,}\b")
+_OFF = {"0", "false", "no", "off", "never"}
+
+VERDICT = {  # decision -> (headline, colour)
+    "DIFFERENT_ENTITY": ("CLEARED", GREEN),
+    "SAME_ENTITY": ("MATCH → compliance", RED),
+    "REVIEW": ("REVIEW → analyst", YELLOW),
+}
+DECISION_COLOR = {"DIFFERENT_ENTITY": GREEN, "SAME_ENTITY": RED, "REVIEW": YELLOW}
+TIER_STYLE = {
+    "AUTO_CLEAR": (BLACK, BG_GREEN),
+    "AUTO_ESCALATE": (WHITE, BG_RED),
+    "BORDERLINE": (BLACK, BG_YELLOW),
+    "HUMAN_REVIEW": (WHITE, BG_BLUE),
+}
+TIER_MEANING = {
+    "AUTO_CLEAR": "cleared on a hard contradiction",
+    "AUTO_ESCALATE": "straight to compliance",
+    "BORDERLINE": "4-eyes: a second analyst confirms",
+    "HUMAN_REVIEW": "analyst decides",
+}
+AGREEMENT_STYLE = {"AGREE": ("✓ AGREE", GREEN), "DISAGREE": ("≠ DISAGREE", YELLOW),
+                   "CONFLICT": ("✗ CONFLICT", RED), "N/A": ("- n/a", GREY)}
+SIGNAL_ICON = {"agreement": ("✓", GREEN), "contradiction": ("✗", RED), "neutral": ("·", GREY)}
+VS_CORE_COLOR = {"supports": GREEN, "contradicts": RED, "neutral": GREY}
+
+
+def strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
+
+
+def _enable_vt() -> bool:
+    """Windows consoles need virtual-terminal processing switched on for ANSI codes."""
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        ok = True
+        for std in (-11, -12):  # stdout, stderr
+            handle = kernel32.GetStdHandle(std)
+            mode = ctypes.c_uint32()
+            if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                ok &= bool(kernel32.SetConsoleMode(handle, mode.value | 0x0004))
+        return ok
+    except Exception:  # noqa: BLE001 - no console API: just no colour
+        return False
+
+
+def color_enabled(stream: Any = None) -> bool:
+    """SCREEN_COLOR=1 / FORCE_COLOR force colour; SCREEN_COLOR=0 / NO_COLOR turn it off; else only on a TTY."""
+    forced = os.environ.get("SCREEN_COLOR", "").strip().lower()
+    if forced:
+        return forced not in _OFF
+    if "FORCE_COLOR" in os.environ:
+        return os.environ["FORCE_COLOR"].strip().lower() not in _OFF
+    if os.environ.get("NO_COLOR"):
+        return False
+    stream = stream or sys.stdout
+    try:
+        return bool(stream.isatty()) and _enable_vt()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _width() -> int:
+    try:
+        return max(60, min(160, int(os.environ.get("SCREEN_WIDTH") or 100)))
+    except ValueError:
+        return 100
+
+
+class Style:
+    """Wraps text in SGR codes when on; identity when off (so one renderer serves both)."""
+
+    def __init__(self, on: bool):
+        self.on = on
+
+    def __call__(self, text: Any, *codes: str) -> str:
+        text = str(text)
+        if not self.on or not codes or not text:
+            return text
+        return f"\x1b[{';'.join(codes)}m{text}\x1b[0m"
+
+    def ids(self, text: str, *codes: str) -> str:
+        """Style `text`, highlighting record IDs (KYC-..., CUS-..., NOTE-...) in cyan."""
+        out, pos = [], 0
+        for m in _ID_RE.finditer(text):
+            out.append(self(text[pos:m.start()], *codes))
+            out.append(self(m.group(), BOLD, CYAN) if BOLD in codes else self(m.group(), CYAN))
+            pos = m.end()
+        out.append(self(text[pos:], *codes))
+        return "".join(out)
+
+    def num(self, value: Any) -> str:
+        return self(value, BOLD, CYAN)
+
+    def decision(self, value: str | None) -> str:
+        return self(value or "-", BOLD, DECISION_COLOR.get(value or "", GREY))
+
+    def verdict(self, decision: str | None) -> str:
+        label, color = VERDICT.get(decision or "", (decision or "-", GREY))
+        return self(f"● {label}", BOLD, color)
+
+    def badge(self, tier: str | None, pad: int = 0) -> str:
+        fg, bg = TIER_STYLE.get(tier or "", (WHITE, "100"))
+        text = f" {tier or '-'} ".ljust(pad + 2) if pad else f" {tier or '-'} "
+        return self(text, BOLD, fg, bg)
+
+    def agreement(self, value: str | None) -> str:
+        label, color = AGREEMENT_STYLE.get(value or "N/A", (value or "-", GREY))
+        return self(label, BOLD, color)
+
+    def flags(self, flags: list[str] | tuple[str, ...]) -> str:
+        return " ".join(self(f, YELLOW) for f in flags) if flags else self("-", GREY)
+
+
+def _style(args: argparse.Namespace) -> Style:
+    return Style(color_enabled() and not getattr(args, "json", False))
+
+
+def _section(s: Style, title: str, width: int, extra: str = "") -> str:
+    head = f" {s(title, BOLD, CYAN)}" + (f"  {extra}" if extra else "")
+    pad = max(3, width - len(strip_ansi(head)) - 1)
+    return f"{head} {s(chr(0x2500) * pad, GREY)}"
+
+
+def _wrap(text: Any, avail: int) -> list[str]:
+    return textwrap.wrap(" ".join(str(text or "").split()), max(20, avail),
+                         break_on_hyphens=False, break_long_words=False) or ["-"]
+
+
+def _block(s: Style, text: Any, width: int, first: str, rest: str | None = None, *codes: str) -> list[str]:
+    """Wrap `text` under a (possibly styled) prefix; continuation lines get `rest` (default: blank pad)."""
+    rest = " " * len(strip_ansi(first)) if rest is None else rest
+    avail = width - len(strip_ansi(first))
+    return [(first if i == 0 else rest) + s.ids(chunk, *codes) for i, chunk in enumerate(_wrap(text, avail))]
+
+
+def _bar(s: Style, frac: float, width: int = 20, color: str = GREEN) -> str:
+    frac = max(0.0, min(1.0, frac))
+    full = int(round(frac * width))
+    return s("█" * full, color) + s("░" * (width - full), GREY)
+
+
+def render_explain(x: dict[str, Any], color: bool = True, width: int | None = None) -> str:
+    """The case card for one hit (the dict from explain_hit): verdict, why, reviewer action, core vs check,
+    the facet-by-facet trace, the customer resolution path, evidence and policies."""
+    s = Style(color)
+    w = width or _width()
+    out: list[str] = []
+    left = f" {s(x['hit_id'], BOLD)}  {s('alert', GREY)} {s(x['alert_id'], CYAN)}"
+    right = f"{s('engine', GREY)} {s(x['engine'], BOLD)}"
+    out.append(left + " " * max(2, w - len(strip_ansi(left)) - len(strip_ansi(right))) + right)
+    out.append(" " + s("═" * (w - 1), GREY))
+    out.append(f"   {s.verdict(x['decision'])}   {s.decision(x['decision'])} {s('/', GREY)} "
+               f"{s(x['reason_code'], BOLD)}   {s.badge(x['tier'])}   {s('engines', GREY)} "
+               f"{s.agreement(x['agreement'])}")
+    out.append(f"   {s('customer', GREY)}  {s.ids(str(x['customer_record_id'] or '-'), BOLD)}"
+               f"   {s('flags', GREY)}  {s.flags(x['flags'])}"
+               f"   {s('tier', GREY)}  {s(TIER_MEANING.get(x['tier'], ''), ITALIC)}")
+    out.append("")
+    out.append(_section(s, "WHY", w))
+    out += _block(s, x["reason"], w, "   ")
+    if x.get("reviewer_action"):
+        out.append("")
+        out += _block(s, x["reviewer_action"], w, f"   {s(' REVIEWER ACTION ', BOLD, BLACK, BG_YELLOW)}  ",
+                      None, BOLD, YELLOW)
+    out.append("")
+    out.append(_section(s, "CORE vs CHECK", w, s("two independent deterministic engines", GREY)))
+    core = x.get("core")
+    if core:
+        tag = f"   {s('escalated by policy', BOLD, MAGENTA)}" if core["escalated_by_policy"] else ""
+        out.append(f"   {s('core ', BOLD)}  {s.decision(core['decision'])} {s('/', GREY)} {core['reason_code']}{tag}")
+        if core.get("reason") and core["reason"] != x["reason"]:
+            out += _block(s, core["reason"], w, "          ", None, GREY)
+        elif core.get("reason"):
+            out.append(f"          {s('(same reason as above)', GREY)}")
+        if core["reviewer_action"] and core["reviewer_action"] != x["reviewer_action"]:
+            out += _block(s, core["reviewer_action"], w, f"          {s('reviewer:', YELLOW)} ")
+    else:
+        out.append(f"   {s('core ', BOLD)}  {s('(no answer)', GREY)}")
+    chk = x["check"]
+    err = f"   {s('check errored', BOLD, RED)}" if chk.get("errored") else ""
+    out.append(f"   {s('check', BOLD)}  {s.decision(chk['decision'])} {s('/', GREY)} {chk['reason_code']}"
+               f"   {s('flags', GREY)} {s.flags(chk['flags'])}{err}")
+    out.append("")
+    legend = s("✓ agrees  ✗ contradicts  · neutral   |  vs core", GREY)
+    out.append(_section(s, "RULE TRACE", w, legend))
+    facets = chk.get("facets") or []
+    for i, f in enumerate(facets):
+        last = i == len(facets) - 1
+        rail, cont = ("└─", "  ") if last else ("├─", "│ ")
+        icon, icolor = SIGNAL_ICON.get(f["signal"], ("?", GREY))
+        vs = f.get("vs_core", "neutral")
+        head = (f"   {s(rail, GREY)} {s(icon, BOLD, icolor)} {s(str(f['rule_id']).ljust(12), BOLD)} "
+                f"{s(str(f['signal']).ljust(13), icolor)} {s(vs.ljust(11), VS_CORE_COLOR.get(vs, GREY))} ")
+        summary = f["summary"] + (f"  [WEAK: {f['weak_why']}]" if f.get("weak") else "")
+        out += _block(s, summary, w, head, f"   {s(cont, GREY)}" + " " * (len(strip_ansi(head)) - 5))
+    if not facets:
+        out.append(f"   {s('(no facets: the check could not evaluate this hit)', GREY)}")
+    res = x.get("resolution")
+    if res:
+        persons = ", ".join("+".join(p["record_ids"]) for p in res["persons"]) or "none"
+        out.append("")
+        out.append(_section(s, "RESOLUTION PATH", w,
+                            f"{s(res['method'], BOLD)} {s(chr(0x2192), GREY)} {s.ids(persons, BOLD)}"))
+        for n, step in enumerate(res["path"], 1):
+            out += _block(s, step.replace(" -> ", " → "), w, f"   {s(f'{n}.', GREY)} ")
+    out.append("")
+    ev = x.get("evidence") or []
+    out.append(_section(s, "EVIDENCE", w, "   ".join(s(e, BOLD, CYAN) for e in ev) if ev else s("none", GREY)))
+    titles = x.get("policy_titles") or {}
+    out.append(_section(s, "POLICIES", w))
+    for pid, title in titles.items():
+        out.append(f"   {s(f'{pid:<7}', BOLD, MAGENTA)} {title}")
+    if not titles:
+        out.append(f"   {s('-', GREY)}")
+    return "\n".join(out)
+
+
+def explain_text(ds, hit_id: str, mode: str | None = None, color: bool = True, width: int | None = None) -> str:
+    """Render the case card for a hit of an already loaded Dataset (the dashboard reuses its loaded run)."""
+    return render_explain(explain_hit(ds, hit_id, mode or engine_mode()), color=color, width=width)
+
+
+def _value(s: Style, v: Any) -> str:
+    if isinstance(v, bool):
+        return s("✓ true", BOLD, GREEN) if v else s("✗ false", BOLD, RED)
+    if v is None:
+        return s("-", GREY)
+    if isinstance(v, (int, float)):
+        return s.num(v)
+    if isinstance(v, dict):
+        return s("  ·  ", GREY).join(f"{s(k, GREY)} {_value(s, val)}" for k, val in v.items()) or s("-", GREY)
+    if isinstance(v, (list, tuple)):
+        if v and all(isinstance(i, dict) for i in v):
+            return s(f"{len(v)} rows", GREY)
+        return ", ".join(s.ids(str(i)) for i in v) or s("-", GREY)
+    return s.ids(str(v))
+
+
+def _print_kv(s: Style, obj: dict[str, Any], key_width: int = 22) -> None:
+    for key, value in obj.items():
+        print(f" {s(f'{key:>{key_width}}', GREY)}  {_value(s, value)}")
+
+
+class _Progress:
+    """A live progress line on stderr (spinner, stage, bar, hits processed / total, elapsed)."""
+
+    FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def __init__(self, s: Style, stream: Any = None):
+        self.s, self.stream = s, stream or sys.stderr
+        self.label, self.done, self.total = "starting", 0, 0
+        self.t0 = time.perf_counter()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> _Progress:
+        self._thread = threading.Thread(target=self._spin, name="screen-progress", daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=1)
+        self._write("\r\x1b[2K")
+
+    def stage(self, label: str, total: int = 0) -> None:
+        self.label, self.done, self.total = label, 0, total
+
+    def tick(self, done: int, total: int) -> None:
+        self.done, self.total = done, total
+
+    def _write(self, text: str) -> None:
+        try:
+            self.stream.write(text)
+            self.stream.flush()
+        except (OSError, ValueError):
+            pass
+
+    def _spin(self) -> None:
+        i = 0
+        while not self._stop.wait(0.1):
+            i += 1
+            s = self.s
+            frame = s(self.FRAMES[i % len(self.FRAMES)], BOLD, CYAN)
+            elapsed = s(f"{time.perf_counter() - self.t0:6.1f}s", GREY)
+            if self.total:
+                frac = self.done / self.total
+                line = (f"  {frame} {s(f'{self.label:<20}', BOLD)} {_bar(s, frac, 28, CYAN)} "
+                        f"{s.num(f'{self.done:>4}')}{s(f'/{self.total} hits', GREY)}  {elapsed}")
+            else:
+                line = f"  {frame} {s(f'{self.label:<20}', BOLD)} {s('working ...', GREY)}  {elapsed}"
+            self._write("\r\x1b[2K" + line)
+
+
+class _NoProgress:
+    """Stand-in when colour is off: same interface, no output."""
+
+    def __enter__(self) -> _NoProgress:
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def stage(self, label: str, total: int = 0) -> None:
+        return None
+
+    def tick(self, done: int, total: int) -> None:
+        return None
+
+
+def _live(s: Style) -> _Progress | _NoProgress:
+    return _Progress(s) if s.on else _NoProgress()
+
+
+def _decide(ds, mode: str, progress: _Progress | _NoProgress | None, prefix: str = "") -> list[HitDecision]:
+    """pipeline.run(ds, mode), reporting hits processed / total to `progress` (same decisions either way)."""
+    if not isinstance(progress, _Progress):
+        return run(ds, mode)
+    total = len(ds.hits)
+    if mode != "check":
+        from .core import core_results
+
+        progress.stage(f"{prefix}decision core")
+        try:
+            core_results(ds)  # cached on ds; run() reuses it (an error here resurfaces per hit inside run())
+        except Exception:  # noqa: BLE001
+            pass
+    progress.stage(f"{prefix}{'merging' if mode == 'core' else 'independent check'}", total)
+    original, count = _pipeline.adjudicate, [0]
+
+    def counted(*a: Any, **k: Any) -> HitDecision:
+        try:
+            return original(*a, **k)
+        finally:
+            count[0] += 1
+            progress.tick(count[0], total)
+
+    _pipeline.adjudicate = counted
+    try:
+        return run(ds, mode)
+    finally:
+        _pipeline.adjudicate = original
+
+
+def _render_run(s: Style, summary: dict[str, Any], out_path: Path) -> None:
+    w = _width()
+    total = summary["hits"] or 1
+    print(_section(s, "RUN", w, f"{s('engine', GREY)} {s(summary['engine'], BOLD)}  {s('|', GREY)}  "
+                                f"{s.num(summary['hits'])} {s('hits', GREY)}  {s('|', GREY)}  "
+                                f"{s.num(summary['seconds'])} {s('s', GREY)}"))
+    print(f"   {s('TIER'.ljust(15), GREY)} {s('HITS'.rjust(6), GREY)} {s('SHARE'.rjust(7), GREY)}")
+    tiers = summary["tiers"]
+    for tier in TIERS:
+        n = tiers.get(tier, 0)
+        fg, bg = TIER_STYLE[tier]
+        print(f"   {s.badge(tier, 13)} {s.num(f'{n:>6}')} {s(f'{100 * n / total:6.1f}%', GREY)}  "
+              f"{_bar(s, n / total, 30, {BG_GREEN: GREEN, BG_RED: RED, BG_YELLOW: YELLOW}.get(bg, BLUE))}  "
+              f"{s(TIER_MEANING[tier], GREY)}")
+    print(f"   {s(chr(0x2500) * 15, GREY)} {s(chr(0x2500) * 6, GREY)}")
+    print(f"   {s('total'.ljust(15), BOLD)} {s.num(str(summary['hits']).rjust(6))}")
+    print("")
+    decs = summary["decisions"]
+    print(f"   {s('decisions', GREY)}  " + s("  ·  ", GREY).join(
+        f"{s.decision(k)} {s.num(v)}" for k, v in decs.items()))
+    agree = summary.get("engine_agreement")
+    if agree:
+        print(f"   {s('engines  ', GREY)}  {s('agree', GREEN)} {s.num(agree['agree'])}  ·  "
+              f"{s('disagree', YELLOW)} {s.num(agree['disagree'])} {s('(4-eyes)', GREY)}  ·  "
+              f"{s('conflict', RED)} {s.num(agree['conflict'])}")
+    digest = hashlib.sha256(out_path.read_bytes()).hexdigest() if out_path.is_file() else "-"
+    print(f"   {s('output   ', GREY)}  {s(summary['output'], BOLD)}   {s('sha256', GREY)} {s(digest[:16], BOLD, CYAN)}"
+          f"{s(digest[16:], GREY)}")
+
+
+def _short(pair: str) -> str:
+    """DIFFERENT_ENTITY->REVIEW -> DIFFERENT->REVIEW (confusion keys on one line)."""
+    return pair.replace("DIFFERENT_ENTITY", "DIFFERENT").replace("SAME_ENTITY", "SAME")
+
+
+def _metric_cell(s: Style, key: str, value: Any, width: int) -> str:
+    text = f"{str(value):>{width}}"
+    if key == "unsafe_clearances":
+        return s(text, BOLD, GREEN if not value else RED)
+    if isinstance(value, (int, float)):
+        return s.num(text)
+    return s(text, GREY)
+
+
+def _render_eval(s: Style, result: dict[str, Any], mode: str) -> None:
+    w = _width()
+    print(_section(s, "SCORECARD", w, f"{s('engine', GREY)} {s(mode, BOLD)}  {s('|', GREY)}  "
+                                      f"{s.num(result.get('labelled_hits'))} {s('practice labels', GREY)}"))
+    for key, value in result.items():
+        if key in ("labelled_hits", "confusion"):
+            continue
+        label = s(f"{key.replace('_', ' '):<32}", GREY)
+        extra = ""
+        if key == "decision_score" and isinstance(value, (int, float)):
+            extra = "  " + _bar(s, value, 30, GREEN)
+        elif key == "unsafe_clearances":
+            extra = ("  " + s("✓ no real match was ever cleared", GREEN)) if not value else \
+                ("  " + s(f"✗ {value} UNSAFE CLEARANCE(S)", BOLD, RED))
+        print(f"   {label} {_metric_cell(s, key, value, 8)}{extra}")
+    conf = result.get("confusion") or {}
+    if conf:
+        print(f"   {s('confusion (truth->pred)'.ljust(32), GREY)} " + s("  ·  ", GREY).join(
+            f"{s(_short(k), GREY if k.split('->')[0] == k.split('->')[-1] else YELLOW)} {s.num(v)}" for k, v in conf.items()))
+
+
+def _render_compare(s: Style, engines: dict[str, dict[str, Any]], mode: str) -> None:
+    w = _width()
+    n = engines["combined"].get("labelled_hits")
+    print(_section(s, "SCORECARD", w, f"{s('core vs check vs combined', BOLD)}  {s('|', GREY)}  {s.num(n)} "
+                                      f"{s('practice labels', GREY)}  {s('|', GREY)}  {s('selected', GREY)} "
+                                      f"{s(mode, BOLD)}"))
+    head = "".join(s(f"{('> ' if m == mode else '') + m:>12}", BOLD if m == mode else GREY) for m in engines)
+    print(f"   {s('metric'.ljust(32), GREY)}{head}")
+    for key in engines["combined"]:
+        if key in ("confusion", "labelled_hits"):
+            continue
+        cells = "".join(_metric_cell(s, key, engines[m][key], 12) for m in engines)
+        print(f"   {s(key.replace('_', ' ').ljust(32), GREY)}{cells}")
+    unsafe = engines[mode]["unsafe_clearances"]
+    print("")
+    print(f"   {s('verdict', GREY)}  " + (s(f"✓ 0 unsafe clearances with the {mode} engine", BOLD, GREEN)
+                                          if not unsafe else s(f"✗ {unsafe} unsafe clearance(s)", BOLD, RED)))
+    for m, r in engines.items():
+        print(f"   {s(f'confusion {m:<9}', GREY)} " + s("  ·  ", GREY).join(
+            f"{s(_short(k), GREY if k.split('->')[0] == k.split('->')[-1] else YELLOW)} {s.num(v)}"
+            for k, v in r["confusion"].items()))
+
+
 # --------------------------------------------------------------------------- commands
 
 
 def cmd_run(args: argparse.Namespace) -> int:
     started = time.perf_counter()
     mode = _mode(args)
-    ds = load_dataset(args.data)
-    decisions = run(ds, mode)
-    _dump([d.submission() for d in decisions], Path(args.out))
+    s = _style(args)
+    live = s.on and not args.quiet
+    with (_Progress(s) if live else _NoProgress()) as progress:
+        progress.stage("loading data")
+        ds = load_dataset(args.data)
+        decisions = _decide(ds, mode, progress)
+        progress.stage("writing output")
+        _dump([d.submission() for d in decisions], Path(args.out))
     if args.trace:
         _dump([d.full() for d in decisions], Path(args.trace))
     summary = {
@@ -205,7 +666,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         "seconds": round(time.perf_counter() - started, 2),
         "output": str(args.out),
     }
-    if not args.quiet:
+    if live:
+        _render_run(s, summary, Path(args.out))
+    elif not args.quiet:
         _print(summary, args.json)
     return 0
 
@@ -265,13 +728,23 @@ def explain_hit(ds, hit_id: str, mode: str) -> dict[str, Any]:
 
 
 def cmd_explain(args: argparse.Namespace) -> int:
-    ds = load_dataset(args.data)
-    if args.hit_id not in ds.hits:
+    s = _style(args)
+    with _live(s) as progress:
+        progress.stage("loading data")
+        ds = load_dataset(args.data)
+        if args.hit_id not in ds.hits:
+            x = None
+        else:
+            progress.stage(f"explaining {args.hit_id}")
+            x = explain_hit(ds, args.hit_id, _mode(args))
+    if x is None:
         print(f"unknown hit {args.hit_id}", file=sys.stderr)
         return 2
-    x = explain_hit(ds, args.hit_id, _mode(args))
     if args.json:
         print(json.dumps(x, indent=2, ensure_ascii=False))
+        return 0
+    if s.on:
+        print(render_explain(x, color=True))
         return 0
     print(f"{x['hit_id']} (alert {x['alert_id']}) -> {x['decision']} / {x['reason_code']}   [engine {x['engine']}]")
     print(f"  tier: {x['tier']}   flags: {', '.join(x['flags']) or '-'}   agreement: {x['agreement']}")
@@ -308,16 +781,23 @@ def _metrics(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def cmd_eval(args: argparse.Namespace) -> int:
-    ds = load_dataset(args.data)
+    s = _style(args)
+    with _live(s) as progress:
+        progress.stage("loading data")
+        ds = load_dataset(args.data)
     if not ds.practice_labels:
         print("no practice_labels.jsonl in the data folder", file=sys.stderr)
         return 2
     mode = _mode(args)
     if args.compare:
-        engines = {m: _metrics(score([d.submission() for d in run(ds, m)], ds.practice_labels))
-                   for m in ("core", "check", "combined")}
+        with _live(s) as progress:
+            engines = {m: _metrics(score([d.submission() for d in _decide(ds, m, progress, f"{m}: ")],
+                                         ds.practice_labels))
+                       for m in ("core", "check", "combined")}
         if args.json:
             print(json.dumps({"selected": mode, "engines": engines}, indent=2, ensure_ascii=False))
+        elif s.on:
+            _render_compare(s, engines, mode)
         else:
             print(f"{'metric':>34}  {'core':>12} {'check':>12} {'combined':>12}")
             for key in engines["combined"]:
@@ -331,13 +811,22 @@ def cmd_eval(args: argparse.Namespace) -> int:
         with open(args.pred, encoding="utf-8") as fh:
             preds = [json.loads(line) for line in fh if line.strip()]
     else:
-        preds = [d.submission() for d in run(ds, mode)]
+        with _live(s) as progress:
+            preds = [d.submission() for d in _decide(ds, mode, progress)]
     result = score(preds, ds.practice_labels)
     rows = result.pop("rows")
-    _print(result, args.json)
+    if s.on:
+        _render_eval(s, result, "file " + str(args.pred) if args.pred else mode)
+    else:
+        _print(result, args.json)
     if args.verbose and not args.json:
         for r in rows:
-            if not (r["correct"] and r["reason_ok"] and r["customer_ok"]):
+            if s.on and not (r["correct"] and r["reason_ok"] and r["customer_ok"]):
+                unsafe = f"  {s('UNSAFE CLEARANCE', BOLD, RED)}" if r["unsafe"] else ""
+                print(f"   {s(r['hit_id'], BOLD)}  {s('truth', GREY)} {s.decision(r['truth'])}  "
+                      f"{s('pred', GREY)} {s.decision(r['pred'])}  {s('reason_ok', GREY)} {_value(s, r['reason_ok'])}"
+                      f"  {s('customer_ok', GREY)} {_value(s, r['customer_ok'])}{unsafe}")
+            elif not (r["correct"] and r["reason_ok"] and r["customer_ok"]):
                 print(f"  {r['hit_id']}: truth={r['truth']} pred={r['pred']} "
                       f"reason_ok={r['reason_ok']} customer_ok={r['customer_ok']}"
                       f"{'  <-- UNSAFE CLEARANCE' if r['unsafe'] else ''}")
@@ -351,13 +840,19 @@ def cmd_repro(args: argparse.Namespace) -> int:
         str(i) for i in range(100, 100 + max(0, args.runs - 5))
     ]
     engine_args = ["--engine", args.engine] if args.engine else []
+    s = _style(args)
+    if s.on:
+        print(_section(s, "REPRO", _width(), f"{s.num(len(seeds))} {s('fresh processes, different PYTHONHASHSEED', GREY)}"
+                                              f"  {s('|', GREY)}  {s('engine', GREY)} {s(_mode(args), BOLD)}"))
     runs = []
     for i, seed in enumerate(seeds, 1):
         path = out_dir / f"run_{i}.jsonl"
         env = dict(os.environ, PYTHONHASHSEED=seed)
         t0 = time.perf_counter()
-        subprocess.run([sys.executable, str(SCREEN_PY), "run", args.data, str(path), "--quiet", *engine_args],
-                       check=True, env=env)
+        with _live(s) as progress:
+            progress.stage(f"run {i}/{len(seeds)}  seed {seed}")
+            subprocess.run([sys.executable, str(SCREEN_PY), "run", args.data, str(path), "--quiet",
+                            *engine_args], check=True, env=env)
         data = path.read_bytes()
         decisions = {}
         for line in data.decode("utf-8").splitlines():
@@ -365,6 +860,13 @@ def cmd_repro(args: argparse.Namespace) -> int:
             decisions[row["hit_id"]] = (row["decision"], row["reason_code"])
         runs.append({"run": i, "pythonhashseed": seed, "sha256": hashlib.sha256(data).hexdigest(),
                      "seconds": round(time.perf_counter() - t0, 2), "decisions": decisions})
+        if s.on:
+            r, same = runs[-1], runs[-1]["sha256"] == runs[0]["sha256"]
+            mark = s("✓ identical to run 1", BOLD, GREEN) if same else s("✗ DIFFERS from run 1", BOLD, RED)
+            print(f"   {s(f'run {i}/{len(seeds)}', BOLD)}  {s('PYTHONHASHSEED', GREY)} {s(seed.ljust(7), CYAN)} "
+                  f"{s('sha256', GREY)} {s(r['sha256'][:16], BOLD, CYAN)}{s(r['sha256'][16:24] + '…', GREY)}  "
+                  f"{s.num(format(r['seconds'], '6.2f'))}"
+                  f"{s('s', GREY)}  {mark if i > 1 else s('reference', GREY)}", flush=True)
     first = runs[0]["decisions"]
     unstable = sorted(h for h in first if any(r["decisions"].get(h) != first[h] for r in runs[1:]))
     report = {
@@ -376,13 +878,28 @@ def cmd_repro(args: argparse.Namespace) -> int:
         "decision_reproducibility": round(1 - len(unstable) / len(first), 4) if first else None,
     }
     (out_dir / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-    _print(report, args.json)
+    if s.on:
+        print("")
+        ok = report["byte_identical"]
+        print(f"   {s(' BYTE-IDENTICAL ' if ok else ' NOT IDENTICAL ', BOLD, BLACK if ok else WHITE, BG_GREEN if ok else BG_RED)}"
+              f"  {s.num(len(runs))} {s('runs', GREY)}  {s('|', GREY)}  {s.num(report['hits'])} {s('hits', GREY)}"
+              f"  {s('|', GREY)}  {s('decision reproducibility', GREY)} {s.num(report['decision_reproducibility'])}"
+              f"  {s('|', GREY)}  {s('unstable hits', GREY)} {_value(s, report['unstable_hits'] or 0)}")
+        print(f"   {s('report', GREY)} {s((out_dir / 'report.json').as_posix(), BOLD)}")
+    else:
+        _print(report, args.json)
     return 0 if report["byte_identical"] else 1
 
 
 def cmd_summary(args: argparse.Namespace) -> int:
     ds = load_dataset(args.data)
-    _print({"data": str(ds.root), **ds.summary()}, args.json)
+    obj = {"data": str(ds.root), **ds.summary()}
+    s = _style(args)
+    if s.on:
+        print(_section(s, "DATASET", _width(), s(Path(ds.root).as_posix(), BOLD)))
+        _print_kv(s, {k: v for k, v in obj.items() if k != "data"})
+    else:
+        _print(obj, args.json)
     return 0
 
 
@@ -420,15 +937,44 @@ def engine_diff(ds) -> dict[str, Any]:
             "pairs": dict(sorted(pairs.items())), "rows": rows}
 
 
+def _render_diff(s: Style, report: dict[str, Any], pair: str | None) -> None:
+    w = _width()
+    status = report["status"]
+    print(_section(s, "CORE vs CHECK", w, f"{s.num(report['hits'])} {s('hits', GREY)}  {s('|', GREY)}  " +
+                   "  ".join(f"{s.agreement(k)} {s.num(v)}" for k, v in status.items())))
+    total = report["hits"] or 1
+    for p, n in report["pairs"].items():
+        c, k = p.split(":")
+        tag = "" if c == k else s("  ← disagree", BOLD, YELLOW)
+        print(f"   {s.num(f'{n:>5}')}  {s.decision(c).ljust(len(s.decision(c)) + 16 - len(c))} "
+              f"{s(':', GREY)} {s.decision(k)}{' ' * max(1, 17 - len(k))}{_bar(s, n / total, 24, CYAN)}{tag}")
+    print("")
+    title = f"disagreements{' for ' + pair if pair else ''}"
+    print(_section(s, title.upper(), w, s.num(len(report["rows"]))))
+    for r in report["rows"]:
+        print(f"   {s(r['hit_id'].ljust(10), BOLD)} {s.agreement(r['status'])}  {s('core', GREY)} "
+              f"{s.decision(r['core'])}{s('/' + str(r['core_reason_code']), GREY)}  {s('check', GREY)} "
+              f"{s.decision(r['check'])}{s('/' + str(r['check_reason_code']), GREY)}")
+    if report["rows"]:
+        print(f"   {s('Any disagreement goes to a second analyst (BORDERLINE); core-clears/check-confirms is never cleared.', GREY)}")
+
+
 def cmd_diff(args: argparse.Namespace) -> int:
-    ds = load_dataset(args.data)
-    report = engine_diff(ds)
+    s = _style(args)
+    with _live(s) as progress:
+        progress.stage("loading data")
+        ds = load_dataset(args.data)
+        progress.stage("both engines, every hit")
+        report = engine_diff(ds)
     if args.pair:
         want = f"{args.pair[0]}:{args.pair[1]}"
         report["pair_filter"] = want
         report["rows"] = [r for r in report["rows"] if f"{r['core']}:{r['check']}" == want]
     if args.json:
         print(json.dumps(report, indent=2, ensure_ascii=False))
+        return 0
+    if s.on:
+        _render_diff(s, report, report.get("pair_filter"))
         return 0
     print(f"{report['hits']} hits   " + "   ".join(f"{k}: {v}" for k, v in report["status"].items()))
     print("pairs (core:check):")
@@ -458,13 +1004,29 @@ def queue_items(decisions: list[HitDecision], tier: str) -> list[dict[str, Any]]
 
 
 def cmd_queue(args: argparse.Namespace) -> int:
-    ds = load_dataset(args.data)
     mode = _mode(args)
-    items = queue_items(run(ds, mode), args.tier)
+    s = _style(args)
+    with _live(s) as progress:
+        progress.stage("loading data")
+        ds = load_dataset(args.data)
+        items = queue_items(_decide(ds, mode, progress), args.tier)
     shown = items[: args.limit] if args.limit else items
     report = {"engine": mode, "tier": args.tier, "total": len(items), "shown": len(shown), "items": shown}
     if args.json:
         print(json.dumps(report, indent=2, ensure_ascii=False))
+        return 0
+    if s.on:
+        w = _width()
+        more = f"  {s(f'(showing {len(shown)})', GREY)}" if len(shown) < len(items) else ""
+        print(_section(s, "QUEUE", w, f"{s.badge(args.tier)}  {s.num(len(items))} {s('hits', GREY)}{more}  "
+                                      f"{s('|', GREY)}  {s(TIER_MEANING.get(args.tier, ''), ITALIC)}  {s('|', GREY)}  "
+                                      f"{s('engine', GREY)} {s(mode, BOLD)}"))
+        for it in shown:
+            flags = f"  {s.flags(it['flags'])}" if it["flags"] else ""
+            print(f"   {s(it['hit_id'].ljust(10), BOLD)} {s.verdict(it['decision'])}  {s(it['reason_code'], GREY)}"
+                  f"  {s('customer', GREY)} {s.ids(str(it['customer_record_id'] or '-'))}{flags}")
+            label = s("reviewer:", BOLD, YELLOW) + " " if it["reviewer_action"] else ""
+            print("\n".join(_block(s, it["why"], w, "              " + label, "              ")))
         return 0
     print(f"{args.tier}: {len(items)} hits{f' (showing {len(shown)})' if len(shown) < len(items) else ''}"
           f"   [engine {mode}]")
@@ -483,6 +1045,21 @@ def cmd_policy(args: argparse.Namespace) -> int:
     rows = [p.to_dict() for p in REGISTRY if not wanted or p.id in wanted]
     if args.json:
         print(json.dumps({"policies": rows}, indent=2, ensure_ascii=False))
+        return 0
+    s = _style(args)
+    if s.on:
+        w = _width()
+        print(_section(s, "POLICY REGISTRY", w, f"{s.num(len(rows))} {s('rules every decision is traced to', GREY)}"))
+        kinds = {"sop": CYAN, "hofc": MAGENTA, "dual_control": YELLOW}
+        for p in rows:
+            kc = next((c for k, c in kinds.items() if k in str(p["kind"]).lower()), BLUE)
+            print(f"   {s(p['id'].ljust(7), BOLD, kc)} {s(p['title'], BOLD)}  {s(p['kind'], GREY)}")
+            print("\n".join(_block(s, p["effect"], w, f"           {s('effect', GREY)}  ", " " * 19)))
+            print("\n".join(_block(s, "; ".join(p["implemented_by"]), w, f"           {s('code  ', GREY)}  ",
+                                   " " * 19, GREY)))
+            if p["triggers"]:
+                print("\n".join(_block(s, "; ".join(p["triggers"]), w, f"           {s('when  ', GREY)}  ",
+                                       " " * 19, GREY)))
         return 0
     for p in rows:
         print(f"{p['id']:<7} [{p['kind']}] {p['title']}")
