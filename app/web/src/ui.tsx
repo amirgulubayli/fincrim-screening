@@ -1,9 +1,78 @@
-import { createContext, useContext, useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { api, type Agreement, type CaseStatus, type RecordLookup, type Tier } from "./api";
 import { AGREEMENT_LABEL, DECISION_LABEL, STATUS_LABEL, TIER_BY_ID } from "./labels";
 
 /** Record ids the guided demo is pointing at; evidence chips with these ids glow. */
 export const SpotlightContext = createContext<Set<string>>(new Set());
+
+export function readPref(key: string): string | null {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+export function writePref(key: string, v: string) {
+  try { localStorage.setItem(key, v); } catch { /* private mode */ }
+}
+
+/**
+ * Collapsible section with a one-line summary that stays readable while closed.
+ * Open/closed is remembered per `id` (localStorage); `force` opens it without remembering (guided tour).
+ * The body only mounts while open, so closed sections cost nothing.
+ */
+export function Section({ id, title, summary, children, force = false, focusKey, className = "", defaultOpen = false }: {
+  id: string; title: ReactNode; summary?: ReactNode; children: ReactNode; force?: boolean; focusKey?: string; className?: string; defaultOpen?: boolean;
+}) {
+  const key = `sec:${id}`;
+  const [open, setOpen] = useState(() => {
+    const v = readPref(key);
+    return v === null ? defaultOpen : v === "1";
+  });
+  const forced = useRef(false);
+  useEffect(() => {
+    if (force) { forced.current = true; setOpen(true); }
+  }, [force]);
+  return (
+    <details className={`section ${className}`} open={open} data-focus={focusKey}
+      onToggle={(e) => {
+        const o = (e.currentTarget as HTMLDetailsElement).open;
+        if (o === open) return;
+        setOpen(o);
+        if (forced.current && o) { forced.current = false; return; }
+        forced.current = false;
+        writePref(key, o ? "1" : "0");
+      }}>
+      <summary>
+        <svg viewBox="0 0 16 16" className="ico sec-chev" aria-hidden><path d="m6 4 4 4-4 4" /></svg>
+        <span className="sec-title">{title}</span>
+        {summary !== undefined && <span className="sec-sum">{summary}</span>}
+      </summary>
+      {open && <div className="sec-body">{children}</div>}
+    </details>
+  );
+}
+
+/** Small popover menu (button + panel); closes on outside click and Esc. */
+export function Popover({ label, children, className = "", align = "left", buttonClass = "btn", ariaLabel }: {
+  label: ReactNode; children: (close: () => void) => ReactNode; className?: string; align?: "left" | "right"; buttonClass?: string; ariaLabel?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(false); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { setOpen(false); (ref.current?.querySelector("button") as HTMLButtonElement | null)?.focus(); } };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", onDown); document.removeEventListener("keydown", onKey); };
+  }, [open]);
+  return (
+    <div className={`popover ${className}`} ref={ref}>
+      <button className={buttonClass} aria-haspopup="true" aria-expanded={open} aria-label={ariaLabel} onClick={() => setOpen((o) => !o)}>
+        {label}
+        <svg viewBox="0 0 16 16" className={`ico caret ${open ? "up" : ""}`} aria-hidden><path d="m4 6 4 4 4-4" /></svg>
+      </button>
+      {open && <div className={`popover-panel ${align}`} role="menu">{children(() => setOpen(false))}</div>}
+    </div>
+  );
+}
 
 /** AGREE / DISAGREE / CONFLICT between the decision core and the independent rule check. */
 export function AgreementBadge({ status, small = false }: { status: Agreement; small?: boolean }) {

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { api, ENGINE_FLAGS, type Health, type Overview as OverviewData, type ReproState, type Row, type Summary, type Tier } from "./api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { api, ENGINE_FLAGS, type Health, type Overview as OverviewData, type Row, type Summary, type Tier } from "./api";
 import Audit from "./Audit";
 import DetailPane from "./Detail";
 import { TIERS } from "./labels";
@@ -8,17 +8,11 @@ import Queue, { type Filters, type TierTab } from "./Queue";
 import Overview from "./Overview";
 import Terminal from "./Terminal";
 import { TOUR, TourBar } from "./Tour";
-import { SpotlightContext } from "./ui";
+import { Popover, readPref, SpotlightContext, writePref } from "./ui";
 
 type View = "overview" | "queue" | "audit" | "policy";
 type Theme = "light" | "dark";
 
-function readPref(key: string): string | null {
-  try { return localStorage.getItem(key); } catch { return null; }
-}
-function writePref(key: string, v: string) {
-  try { localStorage.setItem(key, v); } catch { /* private mode */ }
-}
 
 /** Two interlocking rings: two engines, one decision. */
 function Mark() {
@@ -31,44 +25,12 @@ function Mark() {
   );
 }
 
-function pct(x: number | null | undefined): string {
-  return x === null || x === undefined ? "—" : `${(x * 100).toFixed(1)}%`;
-}
-
-function Kpi({ label, value, sub, tone = "", title }: { label: string; value: ReactNode; sub?: ReactNode; tone?: string; title?: string }) {
-  return (
-    <div className={`kpi ${tone}`} title={title}>
-      <div className="kpi-label">{label}</div>
-      <div className="kpi-value">{value}</div>
-      {sub && <div className="kpi-sub">{sub}</div>}
-    </div>
-  );
-}
-
-function ReproKpi({ r, onRun }: { r: ReproState | undefined; onRun: () => void }) {
-  if (r?.running) return <Kpi label="Reproducibility" value={<span className="spin">running…</span>} sub="5 fresh runs, different hash seeds" />;
-  const rep = r?.report;
-  if (!rep)
-    return (
-      <Kpi label="Reproducibility" value={<span className="muted">not verified</span>}
-        sub={<button className="link" onClick={onRun}>run 5× check</button>} title={r?.error ?? undefined} />
-    );
-  return (
-    <Kpi
-      label="Reproducibility"
-      tone={rep.byte_identical ? "ok" : "bad"}
-      value={rep.byte_identical ? `${rep.runs.length}/${rep.runs.length} identical` : "NOT identical"}
-      sub={<>{r?.at ? new Date(r.at).toLocaleString() : ""} · <button className="link" onClick={onRun}>re-check</button></>}
-      title={rep.runs.map((x) => `run ${x.run} seed ${x.pythonhashseed}: ${x.sha256.slice(0, 16)}…`).join("\n")}
-    />
-  );
-}
-
 function Header({ s, view, setView, onRerun, running, theme, setTheme, onTour, touring }: {
   s: Summary | null; view: View; setView: (v: View) => void; onRerun: () => void; running: boolean;
   theme: Theme; setTheme: (t: Theme) => void; onTour: () => void; touring: boolean;
 }) {
   const open = (s?.case_status?.OPEN ?? 0) + (s?.case_status?.AWAITING_SECOND ?? 0);
+  const moreView = view === "audit" ? "Audit trail" : view === "policy" ? "Policy & controls" : null;
   return (
     <header className="topbar">
       <div className="brand">
@@ -79,74 +41,39 @@ function Header({ s, view, setView, onRerun, running, theme, setTheme, onTour, t
         </div>
       </div>
       <nav className="nav" aria-label="Views">
-        {([["overview", "Overview"], ["queue", "Review queue"], ["audit", "Audit trail"], ["policy", "Policy & controls"]] as const).map(([id, label]) => (
+        {([["overview", "Overview"], ["queue", "Review queue"]] as const).map(([id, label]) => (
           <button key={id} className={view === id ? "on" : ""} aria-current={view === id ? "page" : undefined} onClick={() => setView(id)}>
             {label}
-            {id === "queue" && s ? <span className="nav-count">{open}</span> : null}
+            {id === "queue" && s ? <span className="nav-count" title={`${open} open cases (${s.case_status?.AWAITING_SECOND ?? 0} awaiting a second analyst)`}>{open}</span> : null}
           </button>
         ))}
+        <Popover className="more-menu" align="right" buttonClass={`nav-more ${moreView ? "on" : ""}`} label={moreView ?? "More"}>
+          {(close) => (
+            <>
+              <button role="menuitem" className={`menu-item ${view === "audit" ? "on" : ""}`} onClick={() => { close(); setView("audit"); }}>
+                Audit trail<span className="menu-note">every analyst action, CSV export</span>
+              </button>
+              <button role="menuitem" className={`menu-item ${view === "policy" ? "on" : ""}`} onClick={() => { close(); setView("policy"); }}>
+                Policy &amp; controls<span className="menu-note">SOP principles mapped to rules</span>
+              </button>
+              <div className="menu-sep" role="separator" />
+              <button role="menuitem" className="menu-item" onClick={() => { close(); setTheme(theme === "dark" ? "light" : "dark"); }}>
+                {theme === "dark" ? "Light theme" : "Presentation theme (dark)"}
+              </button>
+              <button role="menuitem" className="menu-item" disabled={running} onClick={() => { close(); onRerun(); }}>
+                {running ? "Engine running…" : "Re-run engine"}<span className="menu-note">both engines over every hit (~1 min)</span>
+              </button>
+            </>
+          )}
+        </Popover>
       </nav>
       <div className="top-actions">
         <button className={`btn ${touring ? "" : "primary"}`} onClick={onTour} disabled={!s}>
           <svg viewBox="0 0 16 16" aria-hidden className="ico"><path d="M4 2.5v11l9-5.5z" /></svg>
           {touring ? "Restart demo" : "Start demo"}
         </button>
-        <button className="btn icon" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-          aria-label={theme === "dark" ? "Switch to light theme" : "Switch to presentation (dark) theme"}
-          title={theme === "dark" ? "Light theme" : "Presentation theme (dark, projector friendly)"}>
-          {theme === "dark"
-            ? <svg viewBox="0 0 20 20" className="ico" aria-hidden><circle cx="10" cy="10" r="3.6" /><path d="M10 1.8v2M10 16.2v2M1.8 10h2M16.2 10h2M4.2 4.2l1.4 1.4M14.4 14.4l1.4 1.4M4.2 15.8l1.4-1.4M14.4 5.6l1.4-1.4" /></svg>
-            : <svg viewBox="0 0 20 20" className="ico" aria-hidden><path d="M16.5 12.6A7 7 0 0 1 7.4 3.5a7 7 0 1 0 9.1 9.1z" /></svg>}
-        </button>
-        <button className="btn ghost small-btn" onClick={onRerun} disabled={running} title="Re-run both engines over every hit">
-          {running ? "Running…" : "Re-run engine"}
-        </button>
       </div>
     </header>
-  );
-}
-
-/** Compact KPI strip above the queue and the other analyst views. */
-function KpiStrip({ s, onRepro }: { s: Summary | null; onRepro: () => void }) {
-  const ev = s?.eval;
-  const auto = s?.automation;
-  const eng = s?.engines;
-  const open = (s?.case_status?.OPEN ?? 0) + (s?.case_status?.AWAITING_SECOND ?? 0);
-  return (
-    <div className="kpis">
-      <Kpi label="Automation rate" value={pct(auto?.rate)}
-        sub={auto ? `${auto.automated} automated · ${auto.needs_human} need a person` : ""}
-        title="Share of hits decided on solid evidence with no person needed (auto-cleared + auto-escalated)" />
-      <Kpi label="Open cases" value={open} sub={`${s?.case_status?.AWAITING_SECOND ?? 0} awaiting 2nd · ${s?.reviewed_hits ?? 0} reviewed`} />
-      <Kpi
-        label="Unsafe clearances"
-        value={ev ? ev.unsafe_clearances : "n/a"}
-        tone={ev ? (ev.unsafe_clearances === 0 ? "ok" : "bad") : ""}
-        sub={ev ? `on ${ev.labelled_hits} labels · score ${ev.decision_score ?? "—"}` : "no practice labels"}
-        title="True matches or review cases the engine cleared, measured on the labelled practice hits"
-      />
-      <Kpi label="Engine agreement" value={pct(eng?.agreement_rate)}
-        tone={eng ? ((eng.agreement.CONFLICT ?? 0) > 0 ? "warn" : "") : ""}
-        sub={eng ? `${eng.agreement.DISAGREE ?? 0} disagree · ${eng.agreement.CONFLICT ?? 0} conflict` : "dual control off"}
-        title="Decision core and independent rule check reach the same decision on their own. Disagreements go to a 4-eyes check; a core clearance the check contradicts is never cleared." />
-      <Kpi label="Escalated by policy" value={eng ? eng.escalated_by_policy : "—"}
-        sub={eng ? `${eng.with_reviewer_action} with a reviewer action` : ""}
-        title="Hits the decision core kept in review under a Head of Financial Crime policy call instead of clearing them" />
-      <ReproKpi r={s?.repro} onRun={onRepro} />
-      <div className="tier-bar" aria-label="Tier distribution">
-        <div className="tier-bar-track">
-          {TIERS.map((t) => {
-            const n = s?.tiers?.[t.id] ?? 0;
-            return n ? <span key={t.id} className={`seg-fill t-${t.id}`} style={{ flexGrow: n }} title={`${t.label}: ${n}`} /> : null;
-          })}
-        </div>
-        <div className="tier-bar-legend small">
-          {TIERS.map((t) => (
-            <span key={t.id} className={`t-${t.id}`}><span className="dot" />{t.short} {s?.tiers?.[t.id] ?? 0}</span>
-          ))}
-        </div>
-      </div>
-    </div>
   );
 }
 
@@ -169,7 +96,7 @@ function Loading({ h, err }: { h: Health | null; err: string | null }) {
           <div className="error small">Engine failed to start: {h.error}</div>
         ) : (
           <>
-            <div className="progress"><span style={{ width: share === null ? "8%" : `${Math.max(4, share * 100)}%` }} className={share === null ? "indet" : ""} /></div>
+            <div className="progress"><span style={share === null ? undefined : { transform: `scaleX(${Math.max(0.04, share)})` }} className={share === null ? "indet" : ""} /></div>
             <div className="small muted">
               {h ? <>{h.stage ?? "starting"}{p && p.total ? ` · ${p.done}/${p.total} hits` : ""} · {Math.round(h.elapsed_seconds)}s elapsed</> : "waiting for the API…"}
             </div>
@@ -379,7 +306,6 @@ export default function App() {
           <Overview s={summary} o={overview} rows={rows} onTier={openTier} onFilter={openFiltered}
             onStartTour={() => goStep(0)} onRepro={startRepro} />
         )}
-        {view !== "overview" && !step && <KpiStrip s={summary} onRepro={startRepro} />}
         {view === "queue" && (
           <div className="split">
             <Queue rows={visible} counts={counts} engineCounts={engineCounts} tier={tier} setTier={setTier} filters={filters} setFilters={setFilters}

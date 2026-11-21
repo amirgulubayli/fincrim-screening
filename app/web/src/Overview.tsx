@@ -1,6 +1,21 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { Overview as OverviewData, ReproState, Row, Summary, Tier } from "./api";
 import { humanFlag, TIER_BY_ID } from "./labels";
+import { Section } from "./ui";
+
+const REASON_SHORT: Record<string, string> = {
+  SOP_NO_DOB: "no usable hit DOB (SOP)",
+  HOFC_POLICY: "policy caution",
+  AMBIGUOUS_CUSTOMER: "ambiguous customer",
+  NO_CUSTOMER_RECORD: "no customer record",
+  ENGINES_CONFLICT: "engines conflict",
+  OTHER: "other",
+};
+
+function reviewSummary(reasons: Record<string, number>, borderline: number): string {
+  const parts = Object.entries(reasons).map(([k, n]) => `${n} ${REASON_SHORT[k] ?? k}`);
+  return `${parts.join(" · ")} · ${borderline} borderline (4-eyes)`;
+}
 
 /** Visual order of the flow: automation on top, people below. */
 const FLOW: Tier[] = ["AUTO_CLEAR", "AUTO_ESCALATE", "BORDERLINE", "HUMAN_REVIEW"];
@@ -331,19 +346,22 @@ export default function Overview({ s, o, rows, onTier, onFilter, onStartTour, on
         </div>
       </div>
 
-      <div className="stat-strip">
-        <Stat label="Hits screened" i={3} sub={`${o?.alerts ?? "—"} alerts`}><Num value={o?.hits ?? s?.hits} /></Stat>
-        <Stat label="Decided by engine" i={4} sub="cleared or confirmed"><Num value={o?.decided_by_engine_pct} decimals={1} suffix="%" /></Stat>
-        <Stat label="Engine agreement" i={5} sub={`${o?.engines_disagree ?? 0} disagree · ${o?.engines_conflict ?? 0} conflict`}>
-          <Num value={o?.engine_agreement_pct} decimals={1} suffix="%" />
-        </Stat>
-        <Stat label="Reproducible" i={6} tone={rep ? (rep.byte_identical ? "safe" : "bad") : ""}
-          sub={repro?.running ? "running 5 fresh runs…" : rep ? <>byte-identical · <button className="link" onClick={onRepro}>re-check</button></> : <button className="link" onClick={onRepro}>run 5× check</button>}>
-          {rep ? <span className="num">{rep.byte_identical ? runs : 0}/{runs}</span> : <span className="muted">—</span>}
-        </Stat>
-        <Stat label="One full run" i={7} sub="limit is 30 min"><Num value={runSec} prefix="~" suffix=" s" /></Stat>
-        <Stat label="Model cost" i={8} sub="no LLM in the decision path"><span className="num">£0</span></Stat>
-      </div>
+      <Section id="ov-stats" className="more-stats" title="More stats"
+        summary={`${o?.decided_by_engine_pct ?? "—"}% decided by engine · ${o?.engine_agreement_pct ?? "—"}% engine agreement · ${rep ? `${rep.byte_identical ? runs : 0}/${runs} identical runs` : "repro not run"} · £0`}>
+        <div className="stat-strip">
+          <Stat label="Hits screened" i={0} sub={`${o?.alerts ?? "—"} alerts`}><Num value={o?.hits ?? s?.hits} /></Stat>
+          <Stat label="Decided by engine" i={1} sub="cleared or confirmed"><Num value={o?.decided_by_engine_pct} decimals={1} suffix="%" /></Stat>
+          <Stat label="Engine agreement" i={2} sub={`${o?.engines_disagree ?? 0} disagree · ${o?.engines_conflict ?? 0} conflict`}>
+            <Num value={o?.engine_agreement_pct} decimals={1} suffix="%" />
+          </Stat>
+          <Stat label="Reproducible" i={3} tone={rep ? (rep.byte_identical ? "safe" : "bad") : ""}
+            sub={repro?.running ? "running 5 fresh runs…" : rep ? <>byte-identical · <button className="link" onClick={onRepro}>re-check</button></> : <button className="link" onClick={onRepro}>run 5× check</button>}>
+            {rep ? <span className="num">{rep.byte_identical ? runs : 0}/{runs}</span> : <span className="muted">—</span>}
+          </Stat>
+          <Stat label="One full run" i={4} sub="limit is 30 min"><Num value={runSec} prefix="~" suffix=" s" /></Stat>
+          <Stat label="Model cost" i={5} sub="no LLM in the decision path"><span className="num">£0</span></Stat>
+        </div>
+      </Section>
 
       <div className="ov-section">
         <div className="ov-head">
@@ -355,20 +373,17 @@ export default function Overview({ s, o, rows, onTier, onFilter, onStartTour, on
         </div>
       </div>
 
-      <div className="ov-section">
-        <div className="ov-head">
-          <h2>Why people still review</h2>
-          <p>Not guesswork: every hit a person sees is there because a written rule sends it there. Click a reason to see those hits.</p>
-        </div>
-        {o && <Breakdown reasons={o.review_reasons} rows={rows} onFilter={onFilter} />}
-      </div>
-
-      <div className="ov-section">
-        <div className="ov-head">
-          <h2>Two engines, one decision</h2>
-          <p>Dual control in code. The engines are built independently; their disagreements are routed, never averaged away.</p>
-        </div>
-        {s && <EnginesStrip s={s} />}
+      <div className="ov-cards">
+        <Section id="ov-why" className="card" title="Why people still review"
+          summary={o ? reviewSummary(o.review_reasons, tiers.BORDERLINE ?? 0) : "…"}>
+          <p className="sec-lede">Every hit a person sees is there because a written rule sends it there. Click a reason to see those hits.</p>
+          {o && <Breakdown reasons={o.review_reasons} rows={rows} onFilter={onFilter} />}
+        </Section>
+        <Section id="ov-engines" className="card" title="Two engines, one decision"
+          summary={`${s?.engines?.agreement?.AGREE ?? "—"} agree · ${s?.engines?.agreement?.DISAGREE ?? 0} disagree (4-eyes) · ${s?.engines?.agreement?.CONFLICT ?? 0} conflict (never cleared)`}>
+          <p className="sec-lede">Dual control in code. The engines are built independently; their disagreements are routed, never averaged away.</p>
+          {s && <EnginesStrip s={s} />}
+        </Section>
       </div>
     </section>
   );
