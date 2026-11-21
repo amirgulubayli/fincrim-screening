@@ -288,6 +288,67 @@ def summary() -> dict[str, Any]:
             "repro": read_repro()}
 
 
+def _review_reason(d: dict[str, Any]) -> str:
+    """Why a REVIEW hit needs a person; mirrors tools/scorecard.py review_reason()."""
+    s = (d.get("reason") or "").lower()
+    if d.get("reason_code") == "AMBIGUOUS_CUSTOMER_RECORD":
+        return "AMBIGUOUS_CUSTOMER"
+    if "ENGINES_CONFLICT" in d.get("flags", []):
+        return "ENGINES_CONFLICT"
+    if s.startswith("escalated, not cleared"):
+        return "HOFC_POLICY"
+    if "no customer record" in s or "did not lead" in s:
+        return "NO_CUSTOMER_RECORD"
+    if "date of birth" in s:
+        return "SOP_NO_DOB"
+    return "OTHER"
+
+
+@app.get("/api/overview")
+def overview() -> dict[str, Any]:
+    """Read-only headline aggregates for the demo landing (same definitions as tools/scorecard.py)."""
+    _require_ready()
+    ds = STATE.ds
+    assert ds is not None
+    decs = STATE.decisions
+    n = len(decs)
+    dec = Counter(d["decision"] for d in decs.values())
+    tiers = Counter(d["tier"] for d in decs.values())
+    reasons = Counter(_review_reason(d) for d in decs.values() if d["decision"] == "REVIEW")
+    by_tier_reason: dict[str, Counter[str]] = defaultdict(Counter)
+    for d in decs.values():
+        by_tier_reason[d["tier"]][d["reason_code"]] += 1
+    alerts_closed = sum(
+        1 for a in ds.alerts.values()
+        if a.hit_ids and all(decs.get(h, {}).get("decision") == "DIFFERENT_ENTITY" for h in a.hit_ids if h in ds.hits)
+    )
+    disagree = sum("ENGINES_DISAGREE" in d["flags"] for d in decs.values())
+    conflict = sum("ENGINES_CONFLICT" in d["flags"] for d in decs.values())
+
+    def pct(a: int) -> float:
+        return round(100 * a / n, 1) if n else 0.0
+
+    auto = tiers.get("AUTO_CLEAR", 0) + tiers.get("AUTO_ESCALATE", 0)
+    return {
+        "hits": n,
+        "alerts": len(ds.alerts),
+        "alerts_fully_cleared": alerts_closed,
+        "tiers": dict(tiers),
+        "decisions": dict(dec),
+        "fully_automated_pct": pct(auto),
+        "decided_by_engine_pct": pct(dec.get("DIFFERENT_ENTITY", 0) + dec.get("SAME_ENTITY", 0)),
+        "cleared_pct": pct(dec.get("DIFFERENT_ENTITY", 0)),
+        "engine_agreement_pct": pct(n - disagree - conflict),
+        "engines_disagree": disagree,
+        "engines_conflict": conflict,
+        "review_reasons": dict(reasons.most_common()),
+        "tier_reason_codes": {t: dict(c.most_common()) for t, c in by_tier_reason.items()},
+        "run_seconds": STATE.summary.get("run_seconds"),
+        "load_seconds": STATE.summary.get("load_seconds"),
+        "dataset": STATE.summary.get("dataset"),
+    }
+
+
 def _row(d: dict[str, Any], reviews: list[dict[str, Any]]) -> dict[str, Any]:
     ds = STATE.ds
     hit = ds.hits.get(d["hit_id"]) if ds else None

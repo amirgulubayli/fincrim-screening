@@ -1,6 +1,9 @@
-import { useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useState } from "react";
 import { api, type Agreement, type CaseStatus, type RecordLookup, type Tier } from "./api";
 import { AGREEMENT_LABEL, DECISION_LABEL, STATUS_LABEL, TIER_BY_ID } from "./labels";
+
+/** Record ids the guided demo is pointing at; evidence chips with these ids glow. */
+export const SpotlightContext = createContext<Set<string>>(new Set());
 
 /** AGREE / DISAGREE / CONFLICT between the decision core and the independent rule check. */
 export function AgreementBadge({ status, small = false }: { status: Agreement; small?: boolean }) {
@@ -100,6 +103,7 @@ function RecordCard({ id, onClose }: { id: string; onClose: () => void }) {
 /** Record-id chips; clicking one expands the underlying record (read-only) below the row. */
 export function EvidenceList({ ids, empty = "none", highlight }: { ids: string[]; empty?: string; highlight?: Set<string> }) {
   const [open, setOpen] = useState<string | null>(null);
+  const spot = useContext(SpotlightContext);
   const uniq = Array.from(new Set(ids.filter(Boolean)));
   if (!uniq.length) return <span className="muted small">{empty}</span>;
   return (
@@ -108,7 +112,7 @@ export function EvidenceList({ ids, empty = "none", highlight }: { ids: string[]
         {uniq.map((id) => (
           <button
             key={id}
-            className={`chip mono ${open === id ? "open" : ""} ${highlight?.has(id) ? "decisive" : ""}`}
+            className={`chip mono ${open === id ? "open" : ""} ${highlight?.has(id) ? "decisive" : ""} ${spot.has(id) ? "spot" : ""}`}
             aria-expanded={open === id}
             title={highlight?.has(id) ? "Cited as deciding evidence — click to view" : "Click to view the record"}
             onClick={() => setOpen(open === id ? null : id)}

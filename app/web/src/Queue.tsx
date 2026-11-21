@@ -49,7 +49,7 @@ export default function Queue({ rows, counts, engineCounts, tier, setTier, filte
             className={`tab t-${t.id} ${tier === t.id ? "active" : ""}`} onClick={() => setTier(t.id)}
             title={`${t.label} — ${t.who} (key ${t.key})`}>
             <span className="dot" />
-            <span className="tab-label">{t.label}</span>
+            <span className="tab-label">{t.short}</span>
             <span className="count">{counts[t.id] ?? 0}</span>
           </button>
         ))}

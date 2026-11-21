@@ -1,17 +1,23 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { api, type Detail, type EngineVerdict, type Person, type Rec, type TraceRow } from "./api";
 import { AGREEMENT_LABEL, DECISION_LABEL, FACET_LABEL, humanFlag, reasonLabel, TIER_BY_ID, whyTier } from "./labels";
-import { AgreementBadge, Badge, EvidenceList, fmt, StatusPill, TierPill } from "./ui";
+import type { Focus } from "./Tour";
+import { AgreementBadge, Badge, EvidenceList, fmt, SpotlightContext, StatusPill, TierPill } from "./ui";
 
 const CORE_RULE = "CORE.aml";
 
 /** The human-in-the-loop instruction the engine wrote ("Reviewer: ..."). */
 function ReviewerCallout({ text }: { text: string }) {
   return (
-    <div className="reviewer-callout" role="note" aria-label="Reviewer action">
-      <div className="rc-head">Reviewer action</div>
-      <p>{text.charAt(0).toUpperCase() + text.slice(1)}</p>
-      <div className="small muted">Written by the decision core: what a person must check before closing this case.</div>
+    <div className="reviewer-callout" role="note" aria-label="Reviewer action" data-focus="reviewer">
+      <div className="rc-icon" aria-hidden>
+        <svg viewBox="0 0 20 20"><path d="M10 2.5 18 17H2z" /><path d="M10 8v4M10 14.2v.3" /></svg>
+      </div>
+      <div>
+        <div className="rc-head">Reviewer action</div>
+        <p>{text.charAt(0).toUpperCase() + text.slice(1)}</p>
+        <div className="rc-foot">Written by the decision core: what a person must check before closing this case.</div>
+      </div>
     </div>
   );
 }
@@ -37,7 +43,7 @@ function EnginesPanel({ d }: { d: Detail }) {
   const checkRows = d.decision.trace.filter((t) => t.rule_id !== CORE_RULE);
   const decisive = checkRows.filter((t) => t.signal !== "neutral");
   return (
-    <div className="block engines">
+    <div className="block engines" data-focus="engines">
       <div className="engines-head">
         <h3>Two independent engines</h3>
         <AgreementBadge status={e.agreement} />
@@ -171,18 +177,36 @@ function markFor(trace: TraceRow[], facets: string[]): Mark {
 }
 
 const MARK_TEXT: Record<Mark["kind"], string> = {
-  agree: "= agrees",
-  contradict: "≠ contradicts",
-  inconclusive: "~ not decisive",
-  unchecked: "? not checked",
+  agree: "agrees",
+  contradict: "contradicts",
+  inconclusive: "not decisive",
+  unchecked: "not checked",
 };
 
+/** agree / contradict / not decisive / unknown, as an icon (colour is never the only signal). */
+function MarkIcon({ kind }: { kind: Mark["kind"] }) {
+  return (
+    <svg className={`mark-ico mk-${kind}`} viewBox="0 0 20 20" aria-hidden>
+      <circle cx="10" cy="10" r="9" />
+      {kind === "agree" && <path d="M5.8 10.4 8.6 13l5.6-6" />}
+      {kind === "contradict" && <path d="M6.5 6.5l7 7M13.5 6.5l-7 7" />}
+      {kind === "inconclusive" && <path d="M5.5 10.8c1.5-2 3-2 4.5-.8s3 1.2 4.5-.8" />}
+      {kind === "unchecked" && <path d="M7.8 7.6a2.3 2.3 0 1 1 3.2 2.1c-.7.3-1 .8-1 1.5M10 14v.2" />}
+    </svg>
+  );
+}
+
+function MarkLabel({ kind }: { kind: Mark["kind"] }) {
+  return <span className={`mark mk-${kind}`}><MarkIcon kind={kind} />{MARK_TEXT[kind]}</span>;
+}
+
 function Cell({ lines }: { lines: Line[] }) {
-  if (!lines.length) return <span className="muted">unknown</span>;
+  const spot = useContext(SpotlightContext);
+  if (!lines.length) return <span className="muted unknown">unknown</span>;
   return (
     <ul className="cell-lines">
       {lines.map((l, i) => (
-        <li key={i}>
+        <li key={i} className={l.src && spot.has(l.src) ? "spot" : ""}>
           {l.v}
           {(l.note || l.src) && (
             <span className="src">
@@ -202,7 +226,7 @@ function Compare({ d, person }: { d: Detail; person: Person | undefined }) {
   const kyc = latestKyc(person);
   const trace = d.decision.trace;
   return (
-    <table className="compare">
+    <table className="compare" data-focus="compare">
       <thead>
         <tr>
           <th className="facet-col"></th>
@@ -220,7 +244,7 @@ function Compare({ d, person }: { d: Detail; person: Person | undefined }) {
               <th className="facet-col">{c.label}</th>
               <td><Cell lines={c.customer(rec, kyc, d.alert)} /></td>
               <td className="mark-col">
-                <span className={`mark mk-${m.kind}`}>{MARK_TEXT[m.kind]}</span>
+                <MarkLabel kind={m.kind} />
                 {weak && <span className="weak-tag" title={humanFlag(weak.weak_why ?? "")}>weak</span>}
                 {Array.from(new Set(m.rows.filter((t) => t.signal !== "neutral" || m.kind === "inconclusive").map((t) => t.summary)))
                   .slice(0, 2).map((s) => <div key={s} className="mark-why">{s}</div>)}
@@ -417,8 +441,16 @@ function ActionPanel({ d, onDone }: { d: Detail; onDone: () => void }) {
   );
 }
 
-export default function DetailPane({ id, onReviewed }: { id: string | null; onReviewed: () => void }) {
+const VERDICT: Record<string, (decision: string) => { head: string; sub: string }> = {
+  AUTO_CLEAR: () => ({ head: "Cleared", sub: "Not our customer. No action; QA samples it." }),
+  AUTO_ESCALATE: () => ({ head: "Confirmed match", sub: "Escalated to the compliance team automatically." }),
+  BORDERLINE: (dec) => ({ head: `${DECISION_LABEL[dec] ?? dec}, pending 4-eyes`, sub: "Decided, but a second, different analyst must confirm." }),
+  HUMAN_REVIEW: () => ({ head: "Analyst decision required", sub: "The SOP says a person decides this one." }),
+};
+
+export default function DetailPane({ id, onReviewed, focus = null }: { id: string | null; onReviewed: () => void; focus?: Focus | null }) {
   const [d, setD] = useState<Detail | null>(null);
+  const rootRef = useRef<HTMLElement>(null);
   const [err, setErr] = useState<string | null>(null);
   const [person, setPerson] = useState<number | null>(null);
   const load = useCallback(() => {
@@ -437,6 +469,24 @@ export default function DetailPane({ id, onReviewed }: { id: string | null; onRe
   }, [d, persons, person]);
   const chosen: Person | undefined = persons[chosenIdx];
 
+  // Guided demo: scroll the focused section into view and ring it.
+  const loadedId = d?.decision.hit_id;
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root || loadedId !== id) return;
+    root.querySelectorAll(".focus-ring").forEach((el) => el.classList.remove("focus-ring"));
+    if (!focus) return;
+    const el = root.querySelector<HTMLElement>(`[data-focus="${focus}"]`) ?? root.querySelector<HTMLElement>('[data-focus="verdict"]');
+    if (!el) return;
+    const smooth = !window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    const t = setTimeout(() => {
+      if (focus === "verdict") root.scrollTo({ top: 0, behavior: smooth ? "smooth" : "auto" });
+      else el.scrollIntoView({ block: "center", behavior: smooth ? "smooth" : "auto" });
+      el.classList.add("focus-ring");
+    }, 300);
+    return () => clearTimeout(t);
+  }, [focus, loadedId, id]);
+
   if (!id)
     return (
       <section className="detail empty">
@@ -451,37 +501,49 @@ export default function DetailPane({ id, onReviewed }: { id: string | null; onRe
   const dec = d.decision;
   const label = d.practice_label;
   const tier = TIER_BY_ID[dec.tier];
+  const v = (VERDICT[dec.tier] ?? VERDICT.HUMAN_REVIEW)(dec.decision);
   return (
-    <section className="detail" aria-label={`Case file ${dec.hit_id}`}>
-      <div className={`case-head t-${dec.tier}`}>
-        <div className="case-title">
-          <h2><span className="mono">{dec.hit_id}</span></h2>
-          <TierPill tier={dec.tier} long />
+    <section className="detail" aria-label={`Case file ${dec.hit_id}`} ref={rootRef}>
+      <div className={`verdict t-${dec.tier}`} data-focus="verdict" key={dec.hit_id}>
+        <div className="verdict-top">
+          <span className="verdict-tier"><span className="dot" />{tier?.label}</span>
+          <span className="grow" />
+          <span className="mono verdict-id">{dec.hit_id}</span>
           <StatusPill status={d.case.status} />
-          {d.reviews.length > 0 && d.case.final_decision && (
-            <span className="final-box">
-              analyst: <Badge decision={d.case.final_decision} />
-              {d.case.final_decision !== dec.decision && <strong> overrides engine</strong>}
-            </span>
-          )}
-          {label && (
-            <span className={`label-box ${label.decision === dec.decision ? "agree" : "differ"}`} title={fmt(label.reference_reason)}>
-              practice label: {DECISION_LABEL[String(label.decision)] ?? String(label.decision)}
-              {label.decision === dec.decision ? " · engine agrees" : " · engine differs"}
-            </span>
-          )}
         </div>
-        <div className="why"><strong>Why this tier:</strong> {whyTier(dec)} <span className="muted">{tier?.who}.</span></div>
+        <div className="verdict-main">
+          <div className="verdict-words">
+            <h2 className="verdict-head">{v.head}</h2>
+            <div className="verdict-sub">{v.sub}</div>
+          </div>
+          <dl className="verdict-facts">
+            <div><dt>Decision</dt><dd><Badge decision={dec.decision} /></dd></div>
+            <div><dt>Reason</dt><dd title={dec.reason_code}>{reasonLabel(dec.reason_code)}</dd></div>
+            <div><dt>Engines</dt><dd>{dec.engines ? <AgreementBadge status={dec.engines.agreement} /> : "single"}</dd></div>
+            <div><dt>Customer</dt><dd className="mono">{dec.customer_record_id ?? "none resolved"}</dd></div>
+          </dl>
+        </div>
+        {(d.reviews.length > 0 && d.case.final_decision) || label ? (
+          <div className="verdict-foot">
+            {d.reviews.length > 0 && d.case.final_decision && (
+              <span className="final-box">
+                analyst: <Badge decision={d.case.final_decision} />
+                {d.case.final_decision !== dec.decision && <strong> overrides engine</strong>}
+              </span>
+            )}
+            {label && (
+              <span className={`label-box ${label.decision === dec.decision ? "agree" : "differ"}`} title={fmt(label.reference_reason)}>
+                practice label: {DECISION_LABEL[String(label.decision)] ?? String(label.decision)}
+                {label.decision === dec.decision ? " · engine agrees" : " · engine differs"}
+              </span>
+            )}
+          </div>
+        ) : null}
       </div>
 
       <div className="decision-card">
-        <div className="dc-top">
-          <Badge decision={dec.decision} />
-          <span className="reason-code" title={dec.reason_code}>{reasonLabel(dec.reason_code)}</span>
-          <span className="mono muted small">{dec.reason_code}</span>
-          <span className="muted small">· customer <span className="mono">{dec.customer_record_id ?? "none resolved"}</span></span>
-        </div>
-        <p className="reason">{dec.reason}</p>
+        <div className="why"><span className="why-k">Why this tier</span> {whyTier(dec)} <span className="muted">{tier?.who}.</span></div>
+        <p className="reason">{dec.engines?.reviewer_action ? stripReviewer(dec.reason) : dec.reason}</p>
         {dec.engines?.reviewer_action && <ReviewerCallout text={dec.engines.reviewer_action} />}
         <div className="dc-row">
           <span className="k">Deciding evidence</span>
@@ -489,7 +551,7 @@ export default function DetailPane({ id, onReviewed }: { id: string | null; onRe
         </div>
         {dec.flags.length > 0 && (
           <div className="dc-row">
-            <span className="k">Weak-evidence flags</span>
+            <span className="k">Flags</span>
             <div className="chips">{dec.flags.map((f) => <span key={f} className="chip flag" title={f}>{humanFlag(f)}</span>)}</div>
           </div>
         )}
@@ -503,10 +565,10 @@ export default function DetailPane({ id, onReviewed }: { id: string | null; onRe
         <h3>Customer vs watchlist hit</h3>
         <Compare d={d} person={chosen} />
         <div className="legend small muted">
-          <span className="mark mk-agree">= agrees</span> supports a match ·
-          <span className="mark mk-contradict">≠ contradicts</span> rules the hit out ·
-          <span className="mark mk-inconclusive">~ not decisive</span> checked, settles nothing ·
-          <span className="mark mk-unchecked">? not checked</span> no rule spoke — a missing fact is never a contradiction
+          <span><MarkLabel kind="agree" /> supports a match</span>
+          <span><MarkLabel kind="contradict" /> rules the hit out</span>
+          <span><MarkLabel kind="inconclusive" /> checked, settles nothing</span>
+          <span><MarkLabel kind="unchecked" /> no rule spoke: a missing fact is never a contradiction</span>
         </div>
         {Boolean(d.hit.profile_notes || d.hit.details || d.hit.position_or_allegation) && (
           <details className="hit-more">

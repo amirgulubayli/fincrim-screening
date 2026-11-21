@@ -173,6 +173,26 @@ export interface RecordLookup {
   holders?: string[];
 }
 
+/** /api/overview: headline aggregates for the demo landing (same definitions as tools/scorecard.py). */
+export interface Overview {
+  hits: number;
+  alerts: number;
+  alerts_fully_cleared: number;
+  tiers: Record<string, number>;
+  decisions: Record<string, number>;
+  fully_automated_pct: number;
+  decided_by_engine_pct: number;
+  cleared_pct: number;
+  engine_agreement_pct: number;
+  engines_disagree: number;
+  engines_conflict: number;
+  review_reasons: Record<string, number>;
+  tier_reason_codes: Record<string, Record<string, number>>;
+  run_seconds: number | null;
+  load_seconds: number | null;
+  dataset: Record<string, number> | null;
+}
+
 async function j<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
   if (!res.ok) {
@@ -191,6 +211,7 @@ async function j<T>(url: string, init?: RequestInit): Promise<T> {
 export const api = {
   health: () => j<Health>("/api/health"),
   summary: () => j<Summary>("/api/summary"),
+  overview: () => j<Overview>("/api/overview"),
   decisions: () => j<Row[]>("/api/decisions"),
   hit: (id: string) => j<Detail>(`/api/hits/${encodeURIComponent(id)}`),
   record: (id: string) => j<RecordLookup>(`/api/records/${encodeURIComponent(id)}`),
