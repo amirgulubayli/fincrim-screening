@@ -4,90 +4,8 @@ import json, os, re, sys, unicodedata
 from datetime import date
 
 # ---------------------------------------------------------------- loading
-LOAD_WARNINGS = []
-
-# Field-name variants we accept (left) for the schema names the code uses (right). Keys are compared after
-# lower-casing and turning spaces/hyphens into underscores.
-FIELD_ALIASES = {
-    "alerts.jsonl": {"id": "alert_id", "alertid": "alert_id", "screening_date": "screened_at", "screened_on": "screened_at",
-                     "date_screened": "screened_at", "name": "customer_name", "screened_name": "customer_name",
-                     "type": "entity_type", "date_of_birth": "dob", "birth_date": "dob", "account": "account_ref",
-                     "account_id": "account_ref", "account_number": "account_ref", "login": "login_handle",
-                     "username": "login_handle", "customer_email": "email", "hits": "hit_ids", "hit_id_list": "hit_ids"},
-    "hits.jsonl": {"id": "hit_id", "hitid": "hit_id", "score": "match_score", "type": "entity_type", "full_name": "name",
-                   "alias": "aliases", "aka": "aliases", "dob": "dobs", "dates_of_birth": "dobs", "date_of_birth": "dobs",
-                   "birth_dates": "dobs", "country": "countries", "nationalities": "nationality",
-                   "address": "addresses", "pob": "place_of_birth", "date_of_death": "deceased_date",
-                   "death_date": "deceased_date", "category": "categories", "notes": "profile_notes",
-                   "profile": "profile_notes", "status": "life_status"},
-    "customers.jsonl": {"id": "record_id", "customer_id": "record_id", "type": "entity_type", "name": "full_name",
-                        "date_of_birth": "dob", "birth_date": "dob", "country": "residence_country",
-                        "country_of_residence": "residence_country", "residence": "residence_country",
-                        "email_address": "email", "phone_number": "phone", "mobile": "phone"},
-    "accounts.jsonl": {"id": "account_id", "account": "account_id", "record_id": "customer_id", "login": "login_handle",
-                       "username": "login_handle"},
-    "onboarding.jsonl": {"record_id": "customer_id", "applicant_id": "kyc_applicant_id", "kyc_id": "kyc_applicant_id"},
-    "kyc_checks.jsonl": {"id": "check_id", "kyc_applicant_id": "applicant_id", "name": "verified_name",
-                         "dob": "verified_dob", "date_of_birth": "verified_dob", "status": "result",
-                         "outcome": "result", "country": "document_country", "doc_country": "document_country",
-                         "doc_number": "document_number", "checked_on": "checked_at", "date": "checked_at"},
-    "notes.jsonl": {"id": "note_id", "email": "requester_email", "customer_email": "requester_email", "body": "text",
-                    "note": "text", "content": "text", "date": "created_at"},
-    "search_results.jsonl": {"id": "result_id", "q": "query", "text": "snippet", "summary": "snippet"},
-}
-KEEP_LIST = {"hit_ids", "reason_codes", "customer_record_ids", "evidence"}
-
-def _flatten(v):
-    """Lists and dicts from a richer schema become the '; '-separated strings the rules read."""
-    if isinstance(v, dict):
-        tag = v.get("type") or v.get("tag") or v.get("kind")
-        vals = [str(x) for k, x in v.items() if k not in ("type", "tag", "kind") and x not in (None, "")]
-        return ", ".join(vals) + (f" [{tag}]" if tag else "")
-    if isinstance(v, list):
-        return "; ".join(_flatten(x) for x in v if x not in (None, ""))
-    if isinstance(v, bool) or v is None:
-        return v
-    if isinstance(v, (int, float)):
-        return str(v) if not float(v).is_integer() else str(int(v))
-    return str(v).strip()
-
-def normalise_record(name, r):
-    aliases = FIELD_ALIASES.get(name, {})
-    out = {}
-    for k, v in r.items():
-        k2 = re.sub(r"[\s\-]+", "_", str(k).strip().lower())
-        k2 = aliases.get(k2, k2)
-        if k2 in out and out[k2] not in (None, ""):
-            continue                       # never let an alias overwrite a real field
-        if k2 in KEEP_LIST:
-            out[k2] = [str(x).strip() for x in v] if isinstance(v, list) else v
-        else:
-            val = _flatten(v)
-            out[k2] = None if val in ("", "null", "None", "NULL") else val
-    return out
-
-def load_jsonl(folder, name):
-    """Tolerant JSON Lines reader: bad lines, BOMs, encoding errors and field-name variants never stop a run."""
-    p = os.path.join(folder, name)
-    out = []
-    if not os.path.exists(p):
-        LOAD_WARNINGS.append(f"{name}: missing")
-        return out
-    with open(p, encoding="utf-8-sig", errors="replace") as fh:
-        for i, line in enumerate(fh, 1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                r = json.loads(line)
-            except ValueError:
-                LOAD_WARNINGS.append(f"{name}:{i}: bad JSON line skipped")
-                continue
-            if isinstance(r, dict):
-                out.append(normalise_record(name, r))
-            else:
-                LOAD_WARNINGS.append(f"{name}:{i}: not an object, skipped")
-    return out
+import loader
+from loader import LOAD_WARNINGS, DEGRADED, normalise_record, load_jsonl, load_table, FIELD_ALIASES  # noqa: F401
 
 def as_list(v):
     """Accept a list or a '; '-separated string (workbook export)."""
@@ -144,7 +62,14 @@ def parse_date(s, ambiguous=None):
             return _valid(y, a, b)
         if a == b:
             return _valid(y, a, b)
-        return _valid(y, b, a) if (ambiguous or AMBIGUOUS_DMY_POLICY) == "dmy" else _valid(y, None, None)
+        if (ambiguous or AMBIGUOUS_DMY_POLICY) != "dmy":
+            return _valid(y, None, None)
+        first, other = _valid(y, b, a), _valid(y, a, b)
+        if first and other:
+            d = AmbiguousDate(first)
+            d.alt = other
+            return d
+        return first
     m = re.fullmatch(r"([A-Za-z]+)\.? (\d{1,2}) (\d{4})", s) or re.fullmatch(r"([A-Za-z]+)\.?-(\d{1,2})-(\d{4})", s)
     if m and m[1].lower() in MONTHS:                                   # Month d yyyy
         return _valid(int(m[3]), MONTHS[m[1].lower()], int(m[2]))
@@ -177,7 +102,21 @@ def fmt_date(d):
     y, m, dd = d
     return f"{y:04d}" + (f"-{m:02d}" if m else "") + (f"-{dd:02d}" if m and dd else "")
 
+class AmbiguousDate(tuple):
+    """A dd/mm vs mm/dd date read day-first, that remembers the other reading (.alt). Rules treat it as a
+    contradiction only if EVERY reading contradicts, and as agreement if ANY reading agrees."""
+    alt = None
+
+def readings(d):
+    return [d, d.alt] if getattr(d, "alt", None) else [d]
+
 def dob_agrees(c, h):
+    return any(_dob_agrees(x, y) for x in readings(c) for y in readings(h))
+
+def dob_contradicts(c, h):
+    return all(_dob_contradicts(x, y) for x in readings(c) for y in readings(h))
+
+def _dob_agrees(c, h):
     """Policy P7: same year and every part both give is equal."""
     if c[0] != h[0]:
         return False
@@ -187,7 +126,7 @@ def dob_agrees(c, h):
         return False
     return True
 
-def dob_contradicts(c, h):
+def _dob_contradicts(c, h):
     """Policy P6: year more than 1 apart, or same year and months (or days) differ."""
     if abs(c[0] - h[0]) > 1:
         return True
@@ -199,6 +138,9 @@ def dob_contradicts(c, h):
     return False
 
 def date_before(a, b):
+    return all(_date_before(x, y) for x in readings(a) for y in readings(b))
+
+def _date_before(a, b):
     """True only if partial date a is certainly before date b (full)."""
     ay, am, ad = a
     by, bm, bd = b
@@ -331,6 +273,31 @@ def normalise_variants(nv):
     return {"given_name_groups": [[str(x) for x in g] for g in groups if isinstance(g, list)],
             "company_legal_forms": [str(x) for x in forms]}
 
+def osa(a, b):
+    """Edit distance counting a swap of two neighbouring letters as one edit (blocking only)."""
+    if abs(len(a) - len(b)) > 2:
+        return 9
+    d = [[i + j if i * j == 0 else 0 for j in range(len(b) + 1)] for i in range(len(a) + 1)]
+    for i in range(1, len(a) + 1):
+        for j in range(1, len(b) + 1):
+            d[i][j] = min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] != b[j - 1]))
+            if i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                d[i][j] = min(d[i][j], d[i - 2][j - 2] + 1)
+    return d[-1][-1]
+
+def phonetic(t):
+    """Crude romanisation-insensitive key: used only to BLOCK clearances, never to confirm."""
+    t = fold(t)
+    for a, b in (("kh", "h"), ("ph", "f"), ("ck", "k"), ("q", "k"), ("c", "k"), ("z", "s"), ("j", "y"),
+                 ("w", "v"), ("ou", "u"), ("ee", "i"), ("oo", "u")):
+        t = t.replace(a, b)
+    t = t[0] + re.sub(r"[aeiouyh]", "", t[1:]) if t else t
+    return re.sub(r"(.)\1+", r"\1", t)
+
+def _canon_key(self, text):
+    toks = re.findall(r"[a-z]+", fold(text))
+    return " ".join(sorted(f"g{min(self.names.group[t])}" if t in self.names.group else t for t in toks))
+
 class Names:
     def __init__(self, variants):
         self.group, self.members = {}, {}
@@ -382,6 +349,11 @@ class Names:
         """Wider than part_match, used only to BLOCK clearances: a misspelling of one variant of a name
         (Christohper) still links to the other variants of its group (Cristobal)."""
         if self.part_match(a, b):
+            return True
+        n = min(len(a), len(b))
+        if n >= 3 and osa(a, b) <= (1 if n <= 6 else 2):          # Ali / Aly, Christohper / Christophar
+            return True
+        if n >= 3 and phonetic(a) == phonetic(b):                 # Yusuf / Yousef, Hussein / Husain
             return True
         for x, y in ((a, b), (b, a)):
             for g in self.group.get(y, set()):
@@ -437,13 +409,12 @@ class Names:
 # ---------------------------------------------------------------- data access
 class Data:
     def __init__(self, folder):
-        self.alerts = load_jsonl(folder, "alerts.jsonl")
+        self.alerts, self.hits = loader.load_alerts_and_hits(folder)
         need = lambda rows, *keys: [r for r in rows if all(r.get(k) for k in keys)]
         self.alerts = need(self.alerts, "alert_id")
         for a in self.alerts:
             a.setdefault("customer_name", "")
             a["customer_name"] = a.get("customer_name") or ""
-        self.hits = {h["hit_id"]: h for h in need(load_jsonl(folder, "hits.jsonl"), "hit_id")}
         self.customers = {c["record_id"]: c for c in need(load_jsonl(folder, "customers.jsonl"), "record_id")}
         self.by_email, self.by_phone, self.by_year = {}, {}, {}
         for c in self.customers.values():
@@ -472,9 +443,16 @@ class Data:
         detect_day_first(self.alerts, list(self.customers.values()),
                          [k for ks in self.kyc_by_app.values() for k in ks],
                          [n for ns in self.notes_by_email.values() for n in ns])
+        self.all_check_ids = {k["check_id"] for ks in self.kyc_by_app.values() for k in ks}
+        self.all_note_ids = {n["note_id"] for ns in self.notes_by_email.values() for n in ns}
+        self.all_result_ids = set()
         self.search_by_query = {}
         for r in need(load_jsonl(folder, "search_results.jsonl"), "query", "result_id"):
             self.search_by_query.setdefault(r["query"], []).append(r)
+            self.all_result_ids.add(r["result_id"])
+            nq = " ".join(sorted(re.findall(r"[a-z]+", fold(r["query"]))))   # same key whatever the query layout
+            if nq != r["query"]:
+                self.search_by_query.setdefault(nq, []).append(r)
         try:
             with open(os.path.join(folder, "name_variants.json"), encoding="utf-8-sig", errors="replace") as fh:
                 nv = json.load(fh)
@@ -482,6 +460,11 @@ class Data:
             nv = {}
             LOAD_WARNINGS.append("name_variants.json: missing or unreadable, using none")
         self.names = Names(normalise_variants(nv))
+        self.search_by_canon = {}   # fallback: same query up to known given-name variants (a transliterated listing)
+        for r in [x for xs in list(self.search_by_query.values()) for x in xs]:
+            ck = self.canon_key(r["query"])
+            if r not in self.search_by_canon.setdefault(ck, []):
+                self.search_by_canon[ck].append(r)
         # document numbers on approved checks -> records
         self.docs_by_rec, self.recs_by_doc = {}, {}
         for rid in self.customers:
@@ -769,7 +752,7 @@ def hit_profile(D, h):
             if q in seen_q:
                 continue
             seen_q.add(q)
-            for r in D.search_by_query.get(q, []):
+            for r in (D.search_by_query.get(q) or D.search_by_canon.get(D.canon_key(n), [])):
                 sn = r.get("snippet") or ""
                 if phrase not in sn:
                     continue
@@ -817,6 +800,20 @@ def is_patronymic_surname(D, part):
                                               (D.names.group.get(part, set()) & D.names.group.get(p, set()))
                                               for p in PATRONYMIC_SURNAMES)
 
+def given_names_match(D, cust_names, hit_names):
+    """(customer name, hit name) when the names share at least one full name part (variants and typos allowed)
+    but do not agree in full: a possible maiden/married name, a dropped middle name or a reordered name.
+    Used only to block clearances."""
+    N = D.names
+    for cn in cust_names:
+        cp = [p for p in N.parts(cn) if len(p) >= 3]
+        if len(N.parts(cn)) < 2:
+            continue
+        for hn in hit_names:
+            if any(N.variant_link(a, b) for a in cp for b in N.parts(hn) if len(b) >= 3):
+                return cn, hn
+    return None
+
 def given_names_differ(D, vn, hn, part, comp=False):
     """Ozwald's middle rule. True only when the single shared part is the surname on both sides and both sides
     have full given names that clearly differ (no variant, initial, prefix, joined or edit-distance match).
@@ -863,7 +860,10 @@ def cnames(codes):
     return ", ".join(sorted(country_name(c) for c in codes))
 
 def certainly_under16(dob, at):
-    """Customer was certainly younger than 16 on date `at`, given a possibly partial DOB."""
+    """Customer was certainly younger than 16 on date `at`, given a possibly partial DOB (every reading)."""
+    return all(_under16(x, y) for x in readings(dob) for y in readings(at))
+
+def _under16(dob, at):
     y, m, d = dob
     earliest = (y, m or 1, d or 1)               # earliest possible birth date -> oldest possible age
     ay, am, ad = at
@@ -873,6 +873,8 @@ def certainly_under16(dob, at):
 def certainly_after(a, b):
     """Partial date a is certainly after full date b."""
     return date_before(b, a)
+
+Data.canon_key = _canon_key
 
 def decide_one(D, alert, hit, prof):
     hp = hit_profile(D, hit)
@@ -945,6 +947,14 @@ def decide_one(D, alert, hit, prof):
                      f"({prof['dob_src']}) agrees with the hit's {yrs(hp['dobs'])}. However, the customer is linked to "
                      f"{cnames(prof['countries'])} and the hit to {cnames(hp['countries'])}. Under the policy a country "
                      f"difference does not clear a name and date-of-birth match, so the hit is left for review.")
+        gm = None if comp or name_ok or not dob_ok else given_names_match(D, [n for n, _ in prof["names"]], hp["names"])
+        if gm:
+            return R("REVIEW", "INSUFFICIENT_DATA", recs + [prof["dob_src"]] + hp["dob_ev"],
+                     f"Escalated, not cleared: the customer's name {gm[0]} shares a name part with the hit's name {gm[1]}, "
+                     f"and the date of birth {fmt_date(cd)} ({prof['dob_src']}) agrees with the hit's {yrs(hp['dobs'])}. "
+                     f"A changed surname (for example on marriage), a dropped middle name or a different spelling can "
+                     f"explain the rest, so a country difference does not clear it. Reviewer: check former names, "
+                     f"nationality and ID documents.")
         # cite the records, the verified identity check and any notes that supplied a country
         ev = recs + ([prof["verified"]["check_id"]] if prof["verified"] else []) + sorted(prof["country_notes"])
         if hp["business_only"] and not comp:
@@ -982,6 +992,38 @@ def decide_one(D, alert, hit, prof):
                         overlaps.append((xvn, xsrc, hn, sp[0], cg, hg))
                         if not ok and doubt is None:
                             doubt = (xvn, xsrc, hn, sp[0], why)
+            agree_dob = next(((d, src, h) for d, src in all_dobs for h in hp["dobs"] if dob_agrees(d, h)), None)
+            if overlaps and doubt is None and not comp and agree_dob:
+                # Ozwald, 21 Nov: same surname + agreeing DOB -> a different given name alone does not clear
+                xvn, xsrc, hn, part, cg, hg = overlaps[0]
+                d, dsrc, h = agree_dob
+                return R("REVIEW", "INSUFFICIENT_DATA", list(dict.fromkeys([xsrc, dsrc] + hp["dob_ev"])),
+                         f"Escalated, not cleared: the customer's verified legal name {xvn} ({xsrc}) shares the surname "
+                         f"'{part.title()}' with the listed name {hn}, and the date of birth {fmt_date(d)} ({dsrc}) "
+                         f"agrees with the hit's {fmt_date(h)}. Only the given names differ "
+                         f"({' '.join(g.title() for g in cg)} versus {' '.join(g.title() for g in hg)}), which a middle "
+                         f"name or a known-as name can explain. Reviewer: verify the customer's full legal name, "
+                         f"including middle names, from the ID document.")
+            unread = prof["dob_unparsed"] + hp["dob_unparsed"]
+            if overlaps and doubt is None and not comp and not agree_dob and unread:
+                # fail-safe for the same rule: a date of birth we cannot read may be the one that agrees
+                xvn, xsrc, hn, part, cg, hg = overlaps[0]
+                return R("REVIEW", "INSUFFICIENT_DATA", list(dict.fromkeys([xsrc] + recs)),
+                         f"Escalated, not cleared: the customer's verified legal name {xvn} ({xsrc}) shares the surname "
+                         f"'{part.title()}' with the listed name {hn}, but a date of birth on file could not be read "
+                         f"({'; '.join(unread[:3])}), so it may agree. A different given name alone does not clear a "
+                         f"shared surname, since a middle name or a known-as name can explain it. Reviewer: confirm the "
+                         f"date of birth and the customer's full legal name from the ID document.")
+            if overlaps and doubt is None and not comp and not agree_dob and all_dobs and hp["dobs"]:
+                # same rule: dates of birth on both sides that neither clearly agree nor all contradict could be the same person
+                xvn, xsrc, hn, part, cg, hg = overlaps[0]
+                return R("REVIEW", "INSUFFICIENT_DATA", list(dict.fromkeys([xsrc] + recs + hp["dob_ev"])),
+                         f"Escalated, not cleared: the customer's verified legal name {xvn} ({xsrc}) shares the surname "
+                         f"'{part.title()}' with the listed name {hn}, and the customer's date of birth "
+                         f"{fmt_date(all_dobs[0][0])} ({all_dobs[0][1]}) does not rule out the hit's "
+                         f"{' or '.join(fmt_date(h) for h in hp['dobs'][:3])}. A different given name alone does not clear "
+                         f"a shared surname, since a middle name or a known-as name can explain it. Reviewer: verify the "
+                         f"customer's full legal name and date of birth from the ID document.")
             if overlaps and doubt is None:
                 xvn, xsrc, hn, part, cg, hg = overlaps[0]
                 srcs = sorted({o[1] for o in overlaps})
@@ -1123,6 +1165,9 @@ def _raw_hit_countries(h):
     return cs, unknown, bool(tags) and all(t == "business" for t in tags)
 
 def _contradicts(c, h):
+    return all(_contradicts1(x, y) for x in readings(c) for y in readings(h))
+
+def _contradicts1(c, h):
     if abs(c[0] - h[0]) >= 2:
         return True
     return c[0] == h[0] and bool(c[1] and h[1]) and (c[1] != h[1] or bool(c[2] and h[2] and c[2] != h[2]))
@@ -1145,7 +1190,8 @@ def _verify_one(D, alert, hit, recs, code):
         er = min(reps)
         if comp:
             return all(date_before(er, d) for d in cust["dobs"])
-        return all((er[0] - d[0]) - ((er[1], er[2]) < ((d[1] or 1), (d[2] or 1))) < 16 for d in cust["dobs"])
+        return all((er[0] - x[0]) - ((er[1], er[2]) < ((x[1] or 1), (x[2] or 1))) < 16
+                   for d in cust["dobs"] for x in readings(d))
     if code == "DOB_MISMATCH":
         hit_unparsed = any(x and not parse_date(x, "year") for x in as_list(hit.get("dobs")))
         return bool(cust["dobs"] and hp["dobs"]) and not cust["unparsed"] and not hit_unparsed and all(_contradicts(c, h) for c in cust["dobs"] for h in hp["dobs"])
@@ -1159,6 +1205,8 @@ def _verify_one(D, alert, hit, recs, code):
         name_ok = any(n and D.names.agree(n, hn, comp) for n in names for hn in hp["names"])
         dob_ok = any(c[0] == h[0] and not _contradicts(c, h) for c in cust["dobs"] for h in hp["dobs"])
         hit_unparsed = any(x and not parse_date(x, "year") for x in as_list(hit.get("dobs")))
+        if not comp and dob_ok and not name_ok and given_names_match(D, names, hp["names"]):
+            return False
         return not (name_ok and (dob_ok or cust["unparsed"] or hit_unparsed) and not comp)
     if code == "NAME_MISMATCH_VERIFIED":
         if not cust["vnames"]:
@@ -1172,6 +1220,11 @@ def _verify_one(D, alert, hit, recs, code):
                 sp = D.names.shared_parts(vn, hn, comp)
                 if sp and not (len(sp) == 1 and given_names_differ(D, vn, hn, sp[0], comp)[0]):
                     return False
+                if sp and not comp and any(not _contradicts(c, h) and c[0] == h[0] or
+                                           (dob_agrees(c, h)) for c in cust["dobs"] for h in hp["dobs"]):
+                    return False                   # same surname + agreeing DOB never clears on name
+                if sp and not comp and (cust["unparsed"] or any(x and not parse_date(x, "year") for x in as_list(hit.get("dobs")))):
+                    return False                   # an unreadable DOB may be the one that agrees
         return True
     return False
 
@@ -1207,13 +1260,168 @@ def second_check(D, alert, hit, persons, r):
                       f"against the listing before deciding. First-pass reason: {r['reason']}")
     return out
 
+
+# ---------------------------------------------------------------- explain-or-escalate gate
+def _source_kind(D, sid):
+    if not sid:
+        return None
+    if sid in D.customers:
+        return "the bank's customer record"
+    if sid in D.all_check_ids:
+        return "a verified KYC check"
+    if sid in D.all_note_ids:
+        return "a verified KYC note" if sid.upper().startswith("NOTE") else "a note"
+    return None
+
+def _known_id(D, x):
+    return x in D.customers or x in D.all_check_ids or x in D.all_note_ids or x in D.all_result_ids
+
+def regulator_sentence(D, alert, hit, persons, r):
+    """One sentence naming the field, our value, the list's value and the trusted source; None if the decision
+    cannot be stated that concretely."""
+    code = r["reason_code"]
+    targets = persons if r["customer_record_id"] == "AMBIGUOUS" else \
+        [(p, recs) for p, recs in persons if p == r["customer_record_id"]]
+    if not targets or not r.get("evidence") or not all(_known_id(D, e) for e in r["evidence"]):
+        return None
+    hp = hit_profile(D, hit)
+    hname = hit.get("name") or "the listed person"
+    parts = []
+    for primary, recs in targets:
+        prof = person_profile(D, recs, primary)
+        if code == "DOB_MISMATCH":
+            kind = _source_kind(D, prof["dob_src"])
+            if not (kind and prof["dob"] and hp["dobs"]):
+                return None
+            hsrc = f"{hp['dob_src']} {', '.join(hp['dob_ev'])}".strip() if hp["dob_ev"] else (hp["dob_src"] or "list entry")
+            parts.append(f"date of birth: {kind} {prof['dob_src']} gives {fmt_date(prof['dob'])}, the list "
+                         f"({hsrc}) gives {yrs(hp['dobs'])}")
+        elif code == "LOCATION_MISMATCH":
+            if not (prof["countries"] and hp["countries"]):
+                return None
+            srcs = sorted({s for v in prof["country_all"].values() for s in v if _source_kind(D, s)})
+            if not srcs:
+                return None
+            parts.append(f"country: the bank's records ({', '.join(srcs[:4])}) tie the customer only to "
+                         f"{cnames(prof['countries'])}, the list ties {hname} only to {cnames(hp['countries'])} "
+                         f"({', '.join(sorted(set(hp['countries'].values())))})")
+        elif code == "NAME_MISMATCH_VERIFIED":
+            v = prof["verified"]
+            if not (v and v.get("verified_name") and _source_kind(D, v.get("check_id"))):
+                return None
+            parts.append(f"name: the verified legal name {v['verified_name']} ({_source_kind(D, v['check_id'])} "
+                         f"{v['check_id']}) matches none of the list names ({'; '.join(hp['names'][:4])})")
+        elif code == "TEMPORAL_IMPOSSIBILITY":
+            kind = _source_kind(D, prof["dob_src"]) or _source_kind(D, (prof["dobs"] or [(None, None)])[0][1])
+            if not (kind and hp["earliest_report"] and prof["dobs"]):
+                return None
+            d = prof["dob"] or prof["dobs"][0][0]
+            parts.append(f"age: {kind} {prof['dob_src'] or ''} gives a {'incorporation' if prof['entity_type'] == 'Company' else 'birth'} "
+                         f"date of {fmt_date(d)}, too late for the list's earliest dated report on "
+                         f"{fmt_date(hp['earliest_report'])}")
+        elif code == "DECEASED":
+            if not (hp["deceased"] and alert.get("screened_at")):
+                return None
+            parts.append(f"death: the list records {hname} as deceased on {fmt_date(hp['deceased'])}, before "
+                         f"screening on {alert['screened_at']}")
+        elif code == "ENTITY_TYPE_MISMATCH":
+            if not (prof["entity_type"] and hp["entity_type"]):
+                return None
+            parts.append(f"type: the bank's record {primary} is {'a company' if prof['entity_type'] == 'Company' else 'an individual'}, "
+                         f"the list entry is {'a company' if hp['entity_type'] == 'Company' else 'an individual'}")
+        elif r["decision"] == "SAME_ENTITY":
+            src = _source_kind(D, prof["dob_src"]) or "the bank's records"
+            facts = [f"name {(prof['names'] or [('?', '')])[0][0]} agrees with {hname}"]
+            if prof["dob"] and hp["dobs"]:
+                facts.append(f"date of birth {fmt_date(prof['dob'])} ({src} {prof['dob_src']}) agrees with {yrs(hp['dobs'])}")
+            shared = sorted(c for c in prof["countries"] if c in hp["countries"])
+            if shared:
+                facts.append(f"both are linked to {cnames(shared)}")
+            parts.append(", ".join(facts))
+        else:
+            return None
+    lead = {"DIFFERENT_ENTITY": "Cleared on", "SAME_ENTITY": "Matched on"}[r["decision"]]
+    who = f" (each of the {len(targets)} people who fit the alert)" if len(targets) > 1 else ""
+    return f"{lead} {parts[0].split(':')[0] if ':' in parts[0] else 'identity'}{who}: " + \
+        (parts[0].split(": ", 1)[1] if ": " in parts[0] else parts[0]) + "."
+
+def final_gate(D, alert, hit, persons, r):
+    """Explain or escalate: a clearance that cannot be stated as one concrete sentence is not made."""
+    if r["decision"] != "DIFFERENT_ENTITY":
+        return r
+    if regulator_sentence(D, alert, hit, persons, r):
+        return r
+    out = dict(r)
+    out.update(decision="REVIEW", reason_code="INSUFFICIENT_DATA",
+               reason=f"Escalated, not cleared: the first pass found a {r['reason_code'].replace('_', ' ').lower()}, "
+                      f"but it could not be stated with a concrete conflicting value from a trusted record, so the hit "
+                      f"is not cleared. Reviewer: confirm the contradiction from the source records. "
+                      f"First-pass reason: {r['reason']}")
+    return out
+
+# ---------------------------------------------------------------- many-to-many context (never used to clear)
+def _listed_key(hit):
+    return " ".join(sorted(re.findall(r"[a-z]+", fold(hit.get("name") or ""))))
+
+def add_pattern_context(D, out, alerts_by_id):
+    """How many distinct screened customers each listed name hit, and how many distinct listed names each
+    customer hit. Adds plain-English context to REVIEW reasons only."""
+    def cust_key(r):
+        cid = r.get("customer_record_id")
+        if cid and cid != "AMBIGUOUS":
+            return cid
+        a = alerts_by_id.get(r["alert_id"]) or {}
+        return "screened:" + " ".join(sorted(re.findall(r"[a-z]+", fold(a.get("customer_name") or ""))))
+    by_name, by_cust = {}, {}
+    for r in out:
+        h = D.hits.get(r["hit_id"]) if D else None
+        if not h:
+            continue
+        k = _listed_key(h)
+        by_name.setdefault(k, set()).add(cust_key(r))
+        by_cust.setdefault(cust_key(r), set()).add(k)
+    stats = {"names": by_name, "customers": by_cust, "context_added": 0}
+    for r in out:
+        if r["decision"] != "REVIEW" or not D or r["hit_id"] not in D.hits:
+            continue
+        h = D.hits[r["hit_id"]]
+        n_other = len(by_name.get(_listed_key(h), ())) - 1
+        m_other = len(by_cust.get(cust_key(r), ())) - 1
+        notes = []
+        if n_other >= 2:
+            notes.append(f"the listed name {h.get('name')} also matched {n_other} other screened customers in this "
+                         f"run, so this is likely a common-name hit: prioritise a date-of-birth or ID-document check")
+        if m_other >= 2:
+            notes.append(f"this customer's name also matched {m_other} other, unrelated listed people, which also "
+                         f"points to a common name")
+        if notes:
+            base = r["reason"].rstrip()
+            base = base[:-1] if base.endswith(".") else base
+            r["reason"] = base + " (context: " + "; ".join(notes) + ")."   # same sentence count
+            stats["context_added"] += 1
+    return stats
+
 def error_review(hit_id, alert_id, what):
     return {"hit_id": hit_id, "alert_id": alert_id, "decision": "REVIEW", "reason_code": "INSUFFICIENT_DATA",
             "customer_record_id": None,
             "reason": f"Escalated, not cleared: the automated review could not complete for this hit ({what}). "
                       f"Reviewer: assess the hit manually against the customer's records.", "evidence": []}
 
+def degraded_review(r):
+    out = dict(r)
+    why = "; ".join(sorted(set(DEGRADED))[:3])
+    out.update(decision="REVIEW", reason_code="INSUFFICIENT_DATA",
+               reason=f"Escalated, not cleared: the first pass found a {r['reason_code'].replace('_', ' ').lower()}, "
+                      f"but part of the input could not be read or mapped ({why}), so the system clears nothing it "
+                      f"cannot fully see. Reviewer: confirm the contradiction from the source records. "
+                      f"First-pass reason: {r['reason']}")
+    return out
+
+EXPLAIN = None          # set to a list (e.g. by SCREEN_EXPLAIN=<file>) to collect one-sentence reasons
+PATTERN_STATS = {}
+
 def main(folder, outfile):
+    loader.reset()
     try:
         D = Data(folder)
     except Exception as e:                         # cannot even load: still emit a REVIEW line per readable hit
@@ -1221,7 +1429,14 @@ def main(folder, outfile):
         LOAD_WARNINGS.append(f"data load failed: {type(e).__name__}: {e}")
     out, done = [], set()
     alerts = sorted([a for a in (D.alerts if D else []) if a.get("alert_id")], key=lambda a: str(a["alert_id"]))
-    hits = D.hits if D else {h["hit_id"]: h for h in load_jsonl(folder, "hits.jsonl") if h.get("hit_id")}
+    if D is None:
+        try:
+            loader.reset()
+            hits = loader.load_alerts_and_hits(folder)[1]
+        except Exception:
+            hits = {}
+    else:
+        hits = D.hits
     by_alert = {}
     for h in hits.values():
         by_alert.setdefault(h.get("alert_id"), []).append(h["hit_id"])
@@ -1244,21 +1459,42 @@ def main(folder, outfile):
                 r = decide(D, alert, hit, persons, how)
                 if r["decision"] == "DIFFERENT_ENTITY":
                     r = second_check(D, alert, hit, persons, r)
+                if r["decision"] == "DIFFERENT_ENTITY":
+                    r = final_gate(D, alert, hit, persons, r)
+                if EXPLAIN is not None and r["decision"] in ("DIFFERENT_ENTITY", "SAME_ENTITY"):
+                    EXPLAIN.append({"hit_id": hid, "decision": r["decision"], "reason_code": r["reason_code"],
+                                    "regulator_reason": regulator_sentence(D, alert, hit, persons, r)})
+                if r["decision"] == "DIFFERENT_ENTITY" and DEGRADED:
+                    r = degraded_review(r)
                 out.append(r)
             except Exception as e:
                 out.append(error_review(hid, alert["alert_id"], f"{type(e).__name__} while deciding"))
     for hid in sorted(hits):                       # hits whose alert is missing still get a line
         if hid not in done:
             out.append(error_review(hid, hits[hid].get("alert_id"), "its alert was not found"))
+    try:
+        PATTERN_STATS.clear()
+        PATTERN_STATS.update(add_pattern_context(D, out, {a["alert_id"]: a for a in alerts}))
+    except Exception as e:                      # context is optional; never block the output
+        LOAD_WARNINGS.append(f"pattern context skipped ({type(e).__name__})")
     os.makedirs(os.path.dirname(os.path.abspath(outfile)), exist_ok=True)
     with open(outfile, "w", encoding="utf-8") as fh:
         for r in out:
             fh.write(json.dumps(r, ensure_ascii=False) + "\n")
-    for w in LOAD_WARNINGS[:20]:
+    for w in LOAD_WARNINGS[:30] + loader.summary_lines():
         print("warning:", w, file=sys.stderr)
+    if DEGRADED:
+        print("warning: input not fully understood, so no hit was cleared: " + "; ".join(sorted(set(DEGRADED))),
+              file=sys.stderr)
     print(f"wrote {len(out)} decisions to {outfile}", file=sys.stderr)
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
         sys.exit("usage: run <data folder> <output file>")
+    if os.environ.get("SCREEN_EXPLAIN"):          # optional audit file of one-sentence reasons (off by default)
+        EXPLAIN = []
     main(sys.argv[1], sys.argv[2])
+    if EXPLAIN is not None:
+        with open(os.environ["SCREEN_EXPLAIN"], "w", encoding="utf-8") as fh:
+            for e in EXPLAIN:
+                fh.write(json.dumps(e, ensure_ascii=False) + "\n")
