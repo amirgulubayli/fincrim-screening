@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SERVER = ROOT / ".grok" / "plugins" / "fincrim-screening" / "mcp" / "server.py"
 MINI = ROOT / "tests" / "fixtures" / "mini"
 EXPECTED_TOOLS = {"screen_summary", "screen_run", "screen_explain", "review_queue", "screen_eval", "screen_repro",
-                  "engine_diff", "policy_list"}
+                  "engine_diff", "policy_list", "dashboard_up", "dashboard_status", "dashboard_down", "doctor"}
 
 
 def _module():
