@@ -1,0 +1,16 @@
+[
+  {
+    "key": "engine-fuzzy-names",
+    "title": "Engine: add transliteration-aware fuzzy name matching",
+    "labels": ["area:engine", "priority:p0"],
+    "depends_on": [],
+    "body": "## Goal\nMatch names across transliterations (e.g. Mohammed/Muhammad).\n\n## Done when\n- [ ] unit tests cover 10+ variant pairs\n- [ ] `screen.py eval --data data/dev` shows no unsafe clearances"
+  },
+  {
+    "key": "dashboard-match-explain",
+    "title": "Dashboard: show per-field match explanation for each hit",
+    "labels": ["area:dashboard", "priority:p1"],
+    "depends_on": ["engine-fuzzy-names"],
+    "body": "## Goal\nRender the engine's explanation (which fields matched, scores) next to each hit.\n\n## Done when\n- [ ] reviewer can see why a hit was escalated or cleared"
+  }
+]
