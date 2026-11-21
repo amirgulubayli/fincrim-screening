@@ -1,0 +1,13 @@
+---
+description: Project protocol for all work in this repo
+alwaysApply: true
+---
+
+Follow `AGENTS.md` at the repo root for every change. It is the canonical protocol.
+
+Key points:
+- Never commit anything from `data/` (except `data/README.md`), `.xlsx`, `.env` or keys.
+- `system/` is Python standard library only, deterministic, no network, no LLM.
+- When in doubt the engine answers REVIEW; never make a change that can clear a hit on missing data.
+- Work only on an issue you claimed: `python tools/task.py claim N --agent cursor`; finish with `python tools/task.py done`.
+- `python system/screen.py eval --data data/dev` must report 0 unsafe clearances before you finish.
