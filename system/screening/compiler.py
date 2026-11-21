@@ -14,7 +14,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .contracts import CUSTOMER_AMBIGUOUS, REASONS_BY_DECISION, Decision, Facet, ReasonCode, RuleResult, Signal
+from .contracts import (
+    CUSTOMER_AMBIGUOUS,
+    REASONS_BY_DECISION,
+    Decision,
+    Facet,
+    ReasonCode,
+    RuleResult,
+    Signal,
+)
 
 CONTRADICTION_PRIORITY = (
     ReasonCode.ENTITY_TYPE_MISMATCH,

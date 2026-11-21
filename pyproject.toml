@@ -23,6 +23,8 @@ pythonpath = ["system"]
 line-length = 110
 target-version = "py310"
 src = ["system", "tools", "app/server"]
+# verbatim copy of the reviewed contrib engine; keep it byte-identical to contrib/
+extend-exclude = ["system/screening/core/aml_engine.py", "contrib"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
