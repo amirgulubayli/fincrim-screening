@@ -241,8 +241,9 @@ _CANON["the united states"] = "United States"
 def canonical_country(raw: str | None) -> str | None:
     """Best-effort canonical country name (never drops an unknown value).
 
-    Uses the private lexicon above, then normalize_country. This is a HINT for
-    callers; rules should normalise with normalize.countries themselves.
+    normalize.countries first (so the spelling matches what the rules use); the
+    private lexicon above only for values it does not know; an unknown value is
+    kept as written. "International", "Europe" and placeholders give None.
     """
     if not raw or not str(raw).strip():
         return None
@@ -255,20 +256,35 @@ def canonical_country(raw: str | None) -> str | None:
 _COUNTRY_CACHE: dict[str, str | None] = {}
 
 
+def _official(raw: str) -> tuple[str | None, str]:
+    """(canonical, status) from normalize.countries; ("", "missing") if unavailable."""
+    try:
+        from .normalize import countries as official
+    except Exception:  # noqa: BLE001  # pragma: no cover
+        return None, "missing"
+    try:
+        classify = getattr(official, "classify_country", None)
+        if classify is not None:
+            canon, status = classify(raw)
+            return canon, status
+        canon = official.normalize_country(raw)
+        return canon, ("country" if canon else "unknown")
+    except Exception:  # noqa: BLE001 - a broken normaliser must not drop a country
+        return None, "missing"
+
+
 def _canonical_country(raw: str) -> str | None:
     folded = _fold(raw)
-    if folded in _CANON:
-        return _CANON[folded]
     if folded in _NOT_COUNTRIES or not any(ch.isalpha() for ch in folded):
         return None
-    try:
-        from .normalize.countries import normalize_country
-
-        norm = normalize_country(raw)
-    except Exception:  # noqa: BLE001 - a broken normaliser must not drop a country
-        norm = None
-    if norm:
-        return _CANON.get(_fold(norm), norm)
+    canon, status = _official(raw)
+    if canon:
+        return canon
+    if status in {"not_country", "empty"}:
+        return None
+    mine = _CANON.get(folded)
+    if mine:  # spell it the way the official table does, when it knows the name
+        return _official(mine)[0] or mine
     return str(raw).strip()
 
 

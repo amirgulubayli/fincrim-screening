@@ -273,7 +273,14 @@ def _fallback_agree(pa: tuple[str, ...], pb: tuple[str, ...], groups: dict[str, 
 
 
 def names_fit(ds: Dataset, screened: str | None, candidate: str | None, *, company: bool) -> bool:
-    """Does ``candidate`` agree with the screened name (SOP P8)?"""
+    """Does ``candidate`` (a record's name) agree with the screened name (SOP P8)?
+
+    Uses normalize.names.names_agree. Where it declines to judge (a name with fewer
+    than two real parts: that rule is about confirming or clearing a hit, not about
+    finding the customer) P8's plain agreement test on parts is applied: at least two
+    parts match, or every part of the shorter name matches. Erring towards a fit is
+    the safe direction here: an extra candidate can only make a hit AMBIGUOUS.
+    """
     forms = _legal_forms(ds) if company else frozenset()
     pa = name_parts(screened, company=company, legal_forms=forms)
     pb = name_parts(candidate, company=company, legal_forms=forms)
@@ -282,12 +289,17 @@ def names_fit(ds: Dataset, screened: str | None, candidate: str | None, *, compa
     try:
         from .normalize.names import names_agree
 
-        result = names_agree(" ".join(pa), [" ".join(pb)], ds.name_variants)
-        if result is None:
-            return False
-        return bool(getattr(result, "agrees", True))
+        try:
+            result = names_agree(candidate, [screened], ds.name_variants, company=company)
+        except TypeError:  # older signature without the company flag
+            result = names_agree(" ".join(pb), [" ".join(pa)], ds.name_variants)
     except NotImplementedError:
         return _fallback_agree(pa, pb, _variant_groups(ds))
+    if result is None:
+        return False
+    if getattr(result, "judgeable", True):
+        return bool(getattr(result, "agrees", True))
+    return _fallback_agree(pa, pb, _variant_groups(ds))
 
 
 def _record_names(rec: Customer) -> list[str]:
