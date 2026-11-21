@@ -1,12 +1,15 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 
 const PROMPT = "\x1b[36m$\x1b[0m ";
 
-export default function Terminal({ open }: { open: boolean }) {
+export default function Terminal({ open, selected }: { open: boolean; selected: string | null }) {
   const host = useRef<HTMLDivElement>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const runRef = useRef<((cmd: string) => void) | null>(null);
+  const stopRef = useRef<(() => void) | null>(null);
+  const [busy, setBusy] = useState(true);
 
   useEffect(() => {
     const term = new XTerm({
@@ -25,7 +28,8 @@ export default function Terminal({ open }: { open: boolean }) {
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/api/terminal`);
     let line = "";
-    let busy = true;
+    let isBusy = true;
+    const setB = (b: boolean) => { isBusy = b; setBusy(b); };
     const history: string[] = [];
     let hIdx = 0;
 
@@ -33,17 +37,17 @@ export default function Terminal({ open }: { open: boolean }) {
       const text = String(ev.data);
       if (text.includes("\x00done")) {
         term.write(text.replace("\x00done\r\n", ""));
-        busy = false;
+        setB(false);
         term.write(PROMPT);
         return;
       }
       term.write(text);
       if (text.startsWith("screening engine")) {
-        busy = false;
+        setB(false);
         term.write(PROMPT);
       }
     };
-    ws.onclose = () => term.write("\r\n\x1b[31m[disconnected]\x1b[0m\r\n");
+    ws.onclose = () => { setB(true); term.write("\r\n\x1b[31m[disconnected — reload the page to reconnect]\x1b[0m\r\n"); };
 
     const replaceLine = (next: string) => {
       term.write("\b \b".repeat(line.length));
@@ -51,8 +55,36 @@ export default function Terminal({ open }: { open: boolean }) {
       term.write(line);
     };
 
+    const send = (cmd: string) => {
+      if (line.trim() || cmd.trim()) history.push(cmd);
+      hIdx = history.length;
+      setB(true);
+      ws.send(cmd);
+      line = "";
+    };
+
+    runRef.current = (cmd: string) => {
+      if (isBusy || ws.readyState !== WebSocket.OPEN) return;
+      replaceLine(cmd);
+      term.write("\r\n");
+      send(cmd);
+      term.focus();
+    };
+    stopRef.current = () => {
+      if (isBusy && ws.readyState === WebSocket.OPEN) ws.send("\x03");
+    };
+
     term.onData((data) => {
-      if (busy) return;
+      if (data === "\x03") {
+        if (isBusy) {
+          if (ws.readyState === WebSocket.OPEN) ws.send("\x03");
+        } else {
+          term.write("^C\r\n" + PROMPT);
+          line = "";
+        }
+        return;
+      }
+      if (isBusy) return;
       if (data.startsWith("\x1b")) {
         if (data === "\x1b[A" && hIdx > 0) replaceLine(history[--hIdx]);
         if (data === "\x1b[B" && hIdx < history.length) replaceLine(history[++hIdx] ?? "");
@@ -61,11 +93,7 @@ export default function Terminal({ open }: { open: boolean }) {
       for (const ch of data) {
         if (ch === "\r") {
           term.write("\r\n");
-          if (line.trim()) history.push(line);
-          hIdx = history.length;
-          busy = true;
-          ws.send(line);
-          line = "";
+          send(line);
         } else if (ch === "\x7f") {
           if (line.length) {
             line = line.slice(0, -1);
@@ -82,6 +110,8 @@ export default function Terminal({ open }: { open: boolean }) {
     window.addEventListener("resize", onResize);
     return () => {
       window.removeEventListener("resize", onResize);
+      runRef.current = null;
+      stopRef.current = null;
       ws.close();
       term.dispose();
     };
@@ -91,5 +121,20 @@ export default function Terminal({ open }: { open: boolean }) {
     if (open) setTimeout(() => fitRef.current?.fit(), 0);
   }, [open]);
 
-  return <div className="term-host" ref={host} />;
+  const presets = ["screen summary", "screen eval", selected ? `screen explain ${selected}` : null, "screen repro --runs 3"].filter(Boolean) as string[];
+
+  return (
+    <div className="term-wrap">
+      <div className="term-presets">
+        {presets.map((p) => (
+          <button key={p} className="term-btn" disabled={busy} onClick={() => runRef.current?.(p)}>{p}</button>
+        ))}
+        <span className="grow" />
+        <button className="term-btn stop" disabled={!busy} onClick={() => stopRef.current?.()} title="Stop the running command (Ctrl+C)">
+          Stop
+        </button>
+      </div>
+      <div className="term-host" ref={host} />
+    </div>
+  );
 }
