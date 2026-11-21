@@ -46,10 +46,7 @@ const COMPARE: CompareRow[] = [
       ...(k ? vals(k.verified_dob).map((v) => ({ v, note: "KYC verified", src: String(k.check_id) })) : []),
       ...(!r.record_id ? vals(a?.dob).map((v) => ({ v, note: "screened" })) : []),
     ],
-    hit: (h) => [
-      ...vals(h.dobs).map((v) => ({ v })),
-      ...vals(h.place_of_birth).map((v) => ({ v, note: "place of birth" })),
-    ],
+    hit: (h) => [...vals(h.dobs).map((v) => ({ v }))],
   },
   {
     label: "Countries",
@@ -65,6 +62,8 @@ const COMPARE: CompareRow[] = [
       ...vals(h.nationality).map((v) => ({ v, note: "nationality" })),
       ...vals(h.citizenship).map((v) => ({ v, note: "citizenship" })),
       ...vals(h.countries).map((v) => ({ v, note: "country" })),
+      ...vals(h.place_of_birth).map((v) => ({ v, note: "place of birth" })),
+      ...vals(h.addresses).map((v) => ({ v, note: "address" })),
     ],
   },
   {
