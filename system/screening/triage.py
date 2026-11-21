@@ -14,8 +14,11 @@ from .contracts import Decision, Tier
 
 def flags_for(verdict: Verdict, *, resolution_method: str) -> tuple[str, ...]:
     flags = [r.weak_why or f"WEAK_{r.facet.value.upper()}" for r in verdict.used if r.weak]
-    if resolution_method in {"unlinked", "none"} and verdict.decision is not Decision.REVIEW:
-        flags.append("NO_CUSTOMER_RECORD")
+    if verdict.decision is not Decision.REVIEW:
+        if verdict.customer_record_id is None:
+            flags.append("NO_CUSTOMER_RECORD")
+        elif resolution_method == "unlinked":
+            flags.append("CUSTOMER_FOUND_BY_SEARCH")  # no link on the alert: worth a 2nd look
     return tuple(dict.fromkeys(flags))
 
 
