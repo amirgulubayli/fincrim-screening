@@ -30,10 +30,17 @@ No tool can change a decision, write to the data folder or edit code.
 |---|---|---|
 | `screen_summary` | `data?` | counts of alerts, hits, customers, accounts, KYC checks, notes, search results, labels |
 | `screen_run` | `data?` | counts by decision, HITL tier, decision x tier, reason code, flag |
-| `screen_explain` | `hit_id`, `data?` | decision, reason code, customer record, reason, evidence IDs, tier, flags, full rule trace |
+| `screen_explain` | `hit_id`, `data?` | decision, reason code, customer record, reason, evidence IDs, tier, flags, full trace (`trace[0]` = decision core `CORE.aml`), plus `core_verdict`, `check_verdict`, `agreement` (AGREE / DISAGREE / CONFLICT / UNAVAILABLE), `escalated_by_policy`, `reviewer_action`, `policies` (ids from `policies_for`) |
+| `engine_diff` | `agreement?`, `limit?` (50), `data?` | dual control: counts by core/check decision pair, agreement counts and rate, hits escalated by policy, list of hits that differ |
+| `policy_list` | `kind?` (sop / hofc / dual_control) | policy registry from `system/screening/policy.py` (`registry()`, else `POLICIES`); built-in HoFC list from `contrib/aml-bot/README.md` if the module is missing |
 | `review_queue` | `tier?` (HUMAN_REVIEW), `limit?` (20), `data?` | hits in that tier, sorted by ID |
 | `screen_eval` | `limit?` (25), `data?` | practice-label score: decision score, accuracy, review rate, **unsafe clearances + hit IDs**, mismatches |
 | `screen_repro` | `runs?` (5), `data?` | N fresh-process runs with different PYTHONHASHSEED: sha256 each, `byte_identical`, unstable hits |
+
+Dual control: the engine runs a **decision core** (decides) and an **independent rule check** (second opinion).
+The server records each check verdict while the pipeline runs (one pass; decisions are exactly `screen run`'s),
+so `screen_explain` / `engine_diff` can show both. The `explain-hit` skill narrates core vs check and always
+surfaces the `Reviewer: ...` instruction verbatim.
 
 Grok shows them as `fincrim-screening__<tool>`. The server imports the engine in-process (repo `system/` on
 `sys.path`) and caches the run until a data file changes; `screen_repro` uses subprocesses because proving

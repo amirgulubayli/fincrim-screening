@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { api, type ReproState, type Row, type Summary } from "./api";
+import { api, ENGINE_FLAGS, type Health, type ReproState, type Row, type Summary } from "./api";
 import Audit from "./Audit";
 import DetailPane from "./Detail";
 import { TIERS } from "./labels";
@@ -47,6 +47,7 @@ function Header({ s, view, setView, onRerun, running, onRepro }: {
 }) {
   const ev = s?.eval;
   const auto = s?.automation;
+  const eng = s?.engines;
   const open = (s?.case_status?.OPEN ?? 0) + (s?.case_status?.AWAITING_SECOND ?? 0);
   return (
     <header className="topbar">
@@ -78,6 +79,13 @@ function Header({ s, view, setView, onRerun, running, onRepro }: {
           sub={ev ? `on ${ev.labelled_hits} practice labels · score ${ev.decision_score ?? "—"}` : "no practice labels"}
           title="True matches or review cases the engine cleared, measured on the labelled practice hits"
         />
+        <Kpi label="Engine agreement" value={pct(eng?.agreement_rate)}
+          tone={eng ? ((eng.agreement.CONFLICT ?? 0) > 0 ? "warn" : "") : ""}
+          sub={eng ? `${eng.agreement.DISAGREE ?? 0} disagree · ${eng.agreement.CONFLICT ?? 0} conflict · of ${eng.compared}` : "dual control off"}
+          title="Decision core and independent rule check reach the same decision on their own. Disagreements go to a 4-eyes check; a core clearance the check contradicts is never cleared." />
+        <Kpi label="Escalated by policy" value={eng ? eng.escalated_by_policy : "—"}
+          sub={eng ? `${eng.with_reviewer_action} with a reviewer action` : ""}
+          title="Hits the decision core kept in review under a Head of Financial Crime policy call instead of clearing them" />
         <ReproKpi r={s?.repro} onRun={onRepro} />
         <div className="tier-bar" aria-label="Tier distribution">
           <div className="tier-bar-track">
@@ -97,7 +105,35 @@ function Header({ s, view, setView, onRerun, running, onRepro }: {
   );
 }
 
-const NO_FILTERS: Filters = { q: "", reason: "", flag: "", status: "" };
+const NO_FILTERS: Filters = { q: "", reason: "", flag: "", status: "", engine: "" };
+
+/** Shown until /api/health reports ready: both engines screen every hit on startup (~70 s on dev). */
+function Loading({ h, err }: { h: Health | null; err: string | null }) {
+  const p = h?.progress;
+  const share = p && p.total ? Math.min(1, p.done / p.total) : null;
+  return (
+    <div className="loading-screen" role="status" aria-live="polite">
+      <div className="loading-card">
+        <strong>Starting the screening engines…</strong>
+        <p className="muted small">
+          The server runs two independent engines over every hit before it answers: the <b>decision core</b> decides,
+          an <b>independent rule check</b> runs alongside. This takes about a minute on the dev data.
+        </p>
+        {h?.status === "error" ? (
+          <div className="error small">Engine failed to start: {h.error}</div>
+        ) : (
+          <>
+            <div className="progress"><span style={{ width: share === null ? "8%" : `${Math.max(4, share * 100)}%` }} className={share === null ? "indet" : ""} /></div>
+            <div className="small muted">
+              {h ? <>{h.stage ?? "starting"}{p && p.total ? ` · ${p.done}/${p.total} hits` : ""} · {Math.round(h.elapsed_seconds)}s elapsed</> : "waiting for the API…"}
+            </div>
+          </>
+        )}
+        {err && <div className="small warn-text">{err}</div>}
+      </div>
+    </div>
+  );
+}
 
 function isTyping(el: EventTarget | null): boolean {
   const t = el as HTMLElement | null;
@@ -118,12 +154,30 @@ export default function App() {
   const [version, setVersion] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
 
+  const [health, setHealth] = useState<Health | null>(null);
+  const [healthErr, setHealthErr] = useState<string | null>(null);
+  const ready = !!health?.ready;
+
   const refresh = useCallback(() => {
     Promise.all([api.summary(), api.decisions()])
       .then(([s, r]) => { setSummary(s); setRows(r); setErr(null); setVersion((v) => v + 1); })
       .catch((e) => setErr(`Cannot reach the API: ${e instanceof Error ? e.message : String(e)}`));
   }, []);
-  useEffect(refresh, [refresh]);
+
+  // Poll /api/health until both engines have screened every hit, then load the results.
+  useEffect(() => {
+    if (ready) return;
+    let stop = false;
+    const tick = () => {
+      api.health()
+        .then((h) => { if (!stop) { setHealth(h); setHealthErr(null); } })
+        .catch((e) => { if (!stop) setHealthErr(`API not reachable yet (${e instanceof Error ? e.message : String(e)}) — retrying`); });
+    };
+    tick();
+    const t = setInterval(tick, 1500);
+    return () => { stop = true; clearInterval(t); };
+  }, [ready]);
+  useEffect(() => { if (ready) refresh(); }, [ready, refresh]);
 
   // Poll the repro badge while a check runs.
   const reproRunning = summary?.repro?.running;
@@ -152,6 +206,7 @@ export default function App() {
       (!filters.reason || r.reason_code === filters.reason) &&
       (!filters.flag || r.flags.includes(filters.flag)) &&
       (!filters.status || r.status === filters.status) &&
+      (!filters.engine || r.flags.includes(filters.engine)) &&
       (!ql || [r.hit_id, r.alert_id, r.hit_name, r.customer_name, r.reason_code, r.customer_record_id, ...r.flags]
         .some((v) => v && v.toLowerCase().includes(ql))));
   }, [rows, filters]);
@@ -165,6 +220,11 @@ export default function App() {
   const visible = useMemo(() => filtered.filter((r) => tier === "ALL" || r.tier === tier), [filtered, tier]);
   const reasons = useMemo(() => Array.from(new Set(rows.map((r) => r.reason_code))).sort(), [rows]);
   const flags = useMemo(() => Array.from(new Set(rows.flatMap((r) => r.flags))).sort(), [rows]);
+  const engineCounts = useMemo(() => {
+    const c: Record<string, number> = {};
+    for (const f of ENGINE_FLAGS) c[f] = rows.filter((r) => r.flags.includes(f)).length;
+    return c;
+  }, [rows]);
 
   // Keyboard: j/k next/prev, 1-4 tiers, 0 all, / search, Esc leaves a field.
   const visibleRef = useRef(visible);
@@ -215,13 +275,14 @@ export default function App() {
 
   return (
     <div className={`app ${termOpen ? "term-open" : ""}`}>
-      <Header s={summary} view={view} setView={setView} onRerun={rerun} running={running} onRepro={startRepro} />
+      <Header s={summary} view={view} setView={setView} onRerun={rerun} running={running || !ready}onRepro={startRepro} />
       {err && <div className="banner error">{err} <button className="link" onClick={refresh}>retry</button></div>}
-      {!summary && !err && <div className="banner">Loading engine results… the server screens every hit on startup.</div>}
-      <main className="main">
+      {ready && !summary && !err && <div className="banner">Loading engine results…</div>}
+      {!ready && <Loading h={health} err={healthErr} />}
+      <main className="main" hidden={!ready}>
         {view === "queue" && (
           <div className="split">
-            <Queue rows={visible} counts={counts} tier={tier} setTier={setTier} filters={filters} setFilters={setFilters}
+            <Queue rows={visible} counts={counts} engineCounts={engineCounts} tier={tier} setTier={setTier} filters={filters} setFilters={setFilters}
               reasons={reasons} flags={flags} selected={selected} onSelect={setSelected} searchRef={searchRef} />
             <DetailPane id={selected} onReviewed={refresh} />
           </div>
@@ -231,7 +292,7 @@ export default function App() {
       </main>
       <footer className="term">
         <button className="term-toggle" onClick={() => setTermOpen((o) => !o)} aria-expanded={termOpen}>
-          {termOpen ? "▾" : "▸"} Terminal <span className="muted">screen summary | eval | explain &lt;HIT&gt; | repro | run — data defaults to the server's</span>
+          {termOpen ? "▾" : "▸"} Terminal <span className="muted">screen summary | eval [--compare] | explain &lt;HIT&gt; [--engine] | diff | queue | policy | repro | run — data defaults to the server's</span>
         </button>
         <div className="term-body" hidden={!termOpen}>
           <Terminal open={termOpen} selected={selected} />

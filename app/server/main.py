@@ -37,8 +37,9 @@ if str(SYSTEM) not in sys.path:
 from screening import __version__  # noqa: E402
 from screening.evaluate import score  # noqa: E402
 from screening.loaders import Dataset, load_dataset  # noqa: E402
-from screening.pipeline import run as run_pipeline  # noqa: E402
 from screening.resolve import resolve_customer  # noqa: E402
+
+from .engines import ENGINE_FLAGS, engine_summary, engine_view, run_dual  # noqa: E402
 
 
 def _data_dir() -> Path:
@@ -50,8 +51,10 @@ DATA_DIR = _data_dir()
 REVIEWS = ROOT / "out" / "reviews.jsonl"
 REPRO_DIR = ROOT / "output" / "repro"
 DIST = Path(__file__).resolve().parents[1] / "web" / "dist"
-ALLOWED_SUBCOMMANDS = {"run", "explain", "eval", "repro", "summary"}
-DATA_SUBCOMMANDS = {"explain", "eval", "repro", "summary"}  # take --data DIR
+# diff / queue / policy and `--engine` / `eval --compare` are the dual-control CLI commands; they are
+# whitelisted ahead of landing in system/screening/cli.py (an unknown one just prints argparse's error).
+ALLOWED_SUBCOMMANDS = {"run", "explain", "eval", "repro", "summary", "diff", "queue", "policy"}
+DATA_SUBCOMMANDS = {"explain", "eval", "repro", "summary", "diff", "queue"}  # take --data DIR
 # Backslashes are turned into forward slashes first (Windows paths); argv is executed without a shell.
 SHELL_META = re.compile(r"[;&|`$<>(){}\[\]*?!~\n\r\"']")
 WRITABLE_DIRS = (ROOT / "output", ROOT / "out")
@@ -67,6 +70,13 @@ class State:
     decisions: dict[str, dict[str, Any]] = {}
     summary: dict[str, Any] = {}
     lock = threading.Lock()
+    compute_lock = threading.Lock()
+    # startup readiness (two engines take ~70 s on dev): loading -> ready | error
+    status = "loading"
+    stage = "starting"
+    progress: tuple[int, int] = (0, 0)
+    started_at = time.time()
+    error: str | None = None
     reviews_lock = threading.Lock()
     repro_running = False
     repro_error: str | None = None
@@ -83,14 +93,29 @@ def _record(rec: Any) -> dict[str, Any] | None:
     return {**d, **({"extra": extra} if extra else {})}
 
 
+def _progress(stage: str, done: int, total: int) -> None:
+    STATE.stage, STATE.progress = stage, (done, total)
+
+
 def compute() -> dict[str, Any]:
+    with STATE.compute_lock:
+        return _compute()
+
+
+def _compute() -> dict[str, Any]:
     t0 = time.perf_counter()
+    _progress("loading data", 0, 0)
     ds = load_dataset(DATA_DIR)
     load_s = time.perf_counter() - t0
     t1 = time.perf_counter()
-    results = run_pipeline(ds)
+    results, core, checks = run_dual(ds, _progress)
     run_s = time.perf_counter() - t1
-    decisions = {d.hit_id: d.full() for d in results}
+    _progress("summarising", len(results), len(results))
+    decisions = {}
+    for d in results:
+        full = d.full()
+        full["engines"] = engine_view(full, core.get(d.hit_id), checks.get(d.hit_id))
+        decisions[d.hit_id] = full
     rule_stats: dict[str, Counter[str]] = defaultdict(Counter)
     for d in decisions.values():
         for t in d["trace"]:
@@ -112,13 +137,14 @@ def compute() -> dict[str, Any]:
             "needs_human": len(decisions) - automated,
             "rate": round(automated / len(decisions), 4) if decisions else None,
         },
+        "engines": engine_summary([d["engines"] for d in decisions.values()]),
         "load_seconds": round(load_s, 2),
         "run_seconds": round(run_s, 2),
         "ran_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "eval": None,
     }
     if ds.practice_labels:
-        ev = score([{k: v for k, v in d.items() if k not in ("tier", "flags", "trace")}
+        ev = score([{k: v for k, v in d.items() if k not in ("tier", "flags", "trace", "engines")}
                     for d in decisions.values()], ds.practice_labels)
         ev.pop("rows", None)
         summary["eval"] = ev
@@ -209,9 +235,19 @@ def _run_repro() -> None:
 # ------------------------------------------------------------------ app
 
 
+def _startup() -> None:
+    """Screen every hit in the background so /api/health answers (with progress) while it runs."""
+    STATE.status, STATE.error, STATE.started_at = "loading", None, time.time()
+    try:
+        compute()
+        STATE.status = "ready"
+    except Exception as exc:  # surfaced by /api/health and the UI, never crashes the server
+        STATE.status, STATE.error = "error", f"{type(exc).__name__}: {exc}"
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    await asyncio.to_thread(compute)
+    threading.Thread(target=_startup, name="engine-startup", daemon=True).start()
     yield
 
 
@@ -220,11 +256,32 @@ app = FastAPI(title="Screening dashboard", version=__version__, lifespan=lifespa
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
-    return {"ok": STATE.ds is not None, "engine_version": __version__, "data": DATA_DIR.as_posix()}
+    """Readiness: `ready` turns true once both engines have screened every hit (~70 s on dev)."""
+    ready = STATE.ds is not None and bool(STATE.summary)
+    done, total = STATE.progress
+    return {
+        "ok": ready,
+        "ready": ready,
+        "status": "ready" if ready else STATE.status,
+        "stage": None if ready else STATE.stage,
+        "progress": None if ready else {"done": done, "total": total},
+        "elapsed_seconds": round(time.time() - STATE.started_at, 1),
+        "error": STATE.error,
+        "engine_version": __version__,
+        "engine_mode": STATE.summary.get("engines", {}).get("mode") if ready else None,
+        "data": DATA_DIR.as_posix(),
+    }
+
+
+def _require_ready() -> None:
+    if STATE.ds is None or not STATE.summary:
+        detail = STATE.error or f"engine still loading ({STATE.stage}); poll /api/health"
+        raise HTTPException(503, detail)
 
 
 @app.get("/api/summary")
 def summary() -> dict[str, Any]:
+    _require_ready()
     by_hit = reviews_by_hit()
     statuses = Counter(case_status(d, by_hit.get(h, []))["status"] for h, d in STATE.decisions.items())
     return {**STATE.summary, "reviewed_hits": len(by_hit), "case_status": dict(sorted(statuses.items())),
@@ -236,6 +293,7 @@ def _row(d: dict[str, Any], reviews: list[dict[str, Any]]) -> dict[str, Any]:
     hit = ds.hits.get(d["hit_id"]) if ds else None
     alert = ds.alerts.get(d["alert_id"]) if ds else None
     cs = case_status(d, reviews)
+    eng = d.get("engines") or {}
     return {
         "hit_id": d["hit_id"],
         "alert_id": d["alert_id"],
@@ -249,11 +307,20 @@ def _row(d: dict[str, Any], reviews: list[dict[str, Any]]) -> dict[str, Any]:
         "review": reviews[-1]["decision"] if reviews else None,
         "status": cs["status"],
         "final_decision": cs["final_decision"],
+        "agreement": eng.get("agreement"),
+        "core_decision": (eng.get("core") or {}).get("decision"),
+        "check_decision": (eng.get("check") or {}).get("decision"),
+        "reviewer_action": bool(eng.get("reviewer_action")),
     }
 
 
 @app.get("/api/decisions")
-def decisions(tier: str | None = None, decision: str | None = None, q: str | None = None) -> list[dict]:
+def decisions(tier: str | None = None, decision: str | None = None, q: str | None = None,
+              engine_flag: str | None = None) -> list[dict]:
+    """Queue rows; `engine_flag` = ENGINES_DISAGREE | ENGINES_CONFLICT | ESCALATED_BY_POLICY."""
+    _require_ready()
+    if engine_flag and engine_flag not in ENGINE_FLAGS:
+        raise HTTPException(422, f"engine_flag must be one of {list(ENGINE_FLAGS)}")
     ql = (q or "").strip().lower()
     by_hit = reviews_by_hit()
     rows = []
@@ -261,6 +328,8 @@ def decisions(tier: str | None = None, decision: str | None = None, q: str | Non
         if tier and d["tier"] != tier:
             continue
         if decision and d["decision"] != decision:
+            continue
+        if engine_flag and engine_flag not in d["flags"]:
             continue
         row = _row(d, by_hit.get(d["hit_id"], []))
         if ql and ql not in " ".join(str(v) for v in row.values() if v).lower():
@@ -272,6 +341,7 @@ def decisions(tier: str | None = None, decision: str | None = None, q: str | Non
 
 @app.get("/api/hits/{hit_id}")
 def hit_detail(hit_id: str) -> dict[str, Any]:
+    _require_ready()
     ds = STATE.ds
     d = STATE.decisions.get(hit_id)
     if ds is None or d is None:
@@ -314,9 +384,9 @@ def hit_detail(hit_id: str) -> dict[str, Any]:
 @app.get("/api/records/{record_id}")
 def record(record_id: str) -> dict[str, Any]:
     """Read-only lookup of any record id cited as evidence."""
+    _require_ready()
     ds = STATE.ds
-    if ds is None:
-        raise HTTPException(503, "dataset not loaded")
+    assert ds is not None
     rid = record_id.strip()
     tables = (
         ("customer", ds.customers),
@@ -348,6 +418,7 @@ class Review(BaseModel):
 
 @app.post("/api/hits/{hit_id}/review")
 def review(hit_id: str, body: Review) -> dict[str, Any]:
+    _require_ready()
     d = STATE.decisions.get(hit_id)
     if d is None:
         raise HTTPException(404, f"unknown hit {hit_id}")
@@ -422,6 +493,7 @@ def reviews_csv() -> Response:
 
 @app.post("/api/run")
 async def rerun() -> dict[str, Any]:
+    _require_ready()
     return await asyncio.to_thread(compute)
 
 
@@ -456,7 +528,7 @@ def parse_command(line: str) -> list[str]:
         raise ValueError("shell metacharacters are not allowed")
     parts = shlex.split(line, posix=True)
     if len(parts) < 2 or parts[0] != "screen":
-        raise ValueError("only `screen <run|explain|eval|repro|summary> ...` is allowed")
+        raise ValueError("only `screen <" + "|".join(sorted(ALLOWED_SUBCOMMANDS)) + "> ...` is allowed")
     sub, args = parts[1], parts[2:]
     if sub not in ALLOWED_SUBCOMMANDS and sub not in ("--help", "-h", "--version"):
         raise ValueError(f"subcommand must be one of {sorted(ALLOWED_SUBCOMMANDS)}")
@@ -559,7 +631,8 @@ async def _run_streaming(ws: WebSocket, argv: list[str], recv: asyncio.Future) -
 async def terminal(ws: WebSocket) -> None:
     await ws.accept()
     await ws.send_text(f"screening engine {__version__} - data: {DATA_DIR.as_posix()}\r\n"
-                       "allowed: screen run|explain|eval|repro|summary ...  (--data defaults to the server's data;"
+                       "allowed: screen run|explain|eval|repro|summary|diff|queue|policy ...  (--engine, eval --compare;"
+                       " --data defaults to the server's data;"
                        f" Ctrl+C stops; {int(COMMAND_TIMEOUT)}s limit)\r\n")
     recv: asyncio.Future = asyncio.ensure_future(ws.receive_text())
     try:

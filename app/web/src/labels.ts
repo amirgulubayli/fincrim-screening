@@ -39,6 +39,24 @@ export const FLAG_LABEL: Record<string, string> = {
   SINGLE_LOCATION_CONTRADICTION: "clearance rests on a single country comparison",
   DECLARED_NOT_VERIFIED: "customer data is declared, not verified by KYC",
   PLACEHOLDER_NAME: "customer name contains placeholder parts",
+  ENGINES_DISAGREE: "the two independent engines reached different decisions",
+  ENGINES_CONFLICT: "the decision core cleared it but the independent check confirms the match — not cleared",
+  ESCALATED_BY_POLICY: "escalated by a Head of Financial Crime policy call, not cleared",
+  CORE_MISSING: "the decision core gave no answer; the independent check decided",
+};
+
+/** Dual control: how the decision core and the independent rule check relate on one hit. */
+export const AGREEMENT_LABEL: Record<string, { short: string; long: string }> = {
+  AGREE: { short: "Agree", long: "Both engines reached the same decision independently." },
+  DISAGREE: { short: "Disagree", long: "The engines reached different decisions; the core decides and a second analyst checks (4-eyes)." },
+  CONFLICT: { short: "Conflict", long: "The core cleared the hit but the independent check confirms the match, so it is not cleared and goes to an analyst." },
+  UNAVAILABLE: { short: "One engine", long: "Only one engine produced a decision for this hit." },
+};
+
+export const ENGINE_FLAG_LABEL: Record<string, string> = {
+  ENGINES_DISAGREE: "Engines disagree",
+  ENGINES_CONFLICT: "Engines conflict (core clear vs check confirm)",
+  ESCALATED_BY_POLICY: "Escalated by policy",
 };
 
 export const STATUS_LABEL: Record<CaseStatus, string> = {
@@ -55,6 +73,7 @@ export const FACET_LABEL: Record<string, string> = {
   dob: "Date of birth",
   location: "Location",
   name: "Name",
+  core: "Decision core",
 };
 
 export function humanFlag(f: string): string {
