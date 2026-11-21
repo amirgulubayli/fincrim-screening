@@ -1,0 +1,5 @@
+# Project-scoped Grok config (only [mcp_servers], [plugins] and [permission] are read from here).
+# Enables the repo's own plugin. Its MCP server still only starts after you trust the project
+# plugin once: `grok plugin install ./.grok/plugins/fincrim-screening --trust` or `/plugins` in the TUI.
+[plugins]
+enabled = ["fincrim-screening"]

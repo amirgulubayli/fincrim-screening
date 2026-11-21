@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "fincrim-screening": {
+      "command": "python",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/server.py"],
+      "env": {
+        "SCREEN_DATA": "${SCREEN_DATA:-data/dev}"
+      }
+    }
+  }
+}
