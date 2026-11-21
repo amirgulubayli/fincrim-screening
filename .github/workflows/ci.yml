@@ -35,16 +35,16 @@ jobs:
   dashboard:
     name: dashboard build
     runs-on: ubuntu-latest
-    if: ${{ hashFiles('app/web/package-lock.json') != '' }}
-    defaults:
-      run:
-        working-directory: app/web
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - id: has_web
+        run: test -f app/web/package-lock.json && echo "yes=true" >> "$GITHUB_OUTPUT" || echo "yes=false" >> "$GITHUB_OUTPUT"
+      - if: steps.has_web.outputs.yes == 'true'
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: app/web/package-lock.json
-      - run: npm ci
-      - run: npm run build
+      - if: steps.has_web.outputs.yes == 'true'
+        working-directory: app/web
+        run: npm ci && npm run build
