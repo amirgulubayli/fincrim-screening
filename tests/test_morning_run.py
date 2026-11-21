@@ -36,7 +36,7 @@ def test_regressions_and_previous(tmp_path):
     assert prev is None and base["healthy"]
     # yesterday scored higher, and today has an unsafe clearance + a non-identical repro
     (tmp_path / "2026-01-01.json").write_text(json.dumps(
-        {"date": "2026-01-01", "data_label": MINI.name, "engine": {"eval": {"decision_score": 0.9}}}))
+        {"date": "2026-01-01", "data_label": MINI.name, "engine": {"eval": {"decision_score": 1.5}}}))
     (tmp_path / "2025-12-31.json").write_text(json.dumps({"date": "2025-12-31", "data_label": "other"}))
     found = morning_run.previous_report(tmp_path, "2026-01-02", MINI.name)
     assert found["date"] == "2026-01-01"
@@ -48,5 +48,5 @@ def test_regressions_and_previous(tmp_path):
     regs = morning_run.find_regressions(report, found)
     assert any("unsafe clearance" in r and "H-9" in r for r in regs)
     assert any("not byte-identical" in r for r in regs)
-    assert any("decision score dropped 0.9" in r for r in regs)
+    assert any("decision score dropped 1.5" in r for r in regs)
     assert "### Regressions" in morning_run.render_markdown({**report, "regressions": regs}, found)
