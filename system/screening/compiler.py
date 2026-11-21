@@ -29,8 +29,8 @@ CONTRADICTION_PRIORITY = (
     ReasonCode.DECEASED,
     ReasonCode.TEMPORAL_IMPOSSIBILITY,
     ReasonCode.DOB_MISMATCH,
+    ReasonCode.LOCATION_MISMATCH,  # same order as the decision core (POLICY.md order)
     ReasonCode.NAME_MISMATCH_VERIFIED,
-    ReasonCode.LOCATION_MISMATCH,
 )
 
 
