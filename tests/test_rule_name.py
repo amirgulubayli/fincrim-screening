@@ -10,7 +10,10 @@ from screening.resolve import Person
 from screening.rules import name
 from screening.rules.base import Context
 
-VARIANTS = {"groups": [["Mohammed", "Muhammad", "Mohd"]], "legal_forms": ["Ltd", "Limited", "AB"]}
+VARIANTS = {
+    "groups": [["Mohammed", "Muhammad", "Mohd"], ["Yusuf", "Josef", "Joseph"]],
+    "legal_forms": ["Ltd", "Limited", "AB"],
+}
 
 
 @dataclass(frozen=True)
@@ -79,18 +82,96 @@ def one(results):
 
 
 def test_verified_name_agreeing_with_no_hit_name_is_mismatch():
-    p = verified_person("Chinedu Azeez", cust(full="Ridwan Azeez"))
+    p = verified_person("Chinedu Okafor", cust(full="Ridwan Azeez"))
     r = one(name.check(ctx(["Ridwan, Azeez", "Ridwan Ade"], p)))
     assert r.signal is Signal.CONTRADICTION
     assert r.reason is ReasonCode.NAME_MISMATCH_VERIFIED
     assert r.evidence == ("KYC-1",)
-    assert "Chinedu Azeez (KYC-1)" in r.summary and "none of the hit's names" in r.summary
+    assert "Chinedu Okafor (KYC-1)" in r.summary and "none of the hit's names" in r.summary
 
 
 def test_note_verified_name_counts():
     p = verified_person("Jonathan Reyes Whitfield", source="NOTE-9")
-    r = one(name.check(ctx(["John Whitfield"], p)))
+    r = one(name.check(ctx(["Ivan Petrov"], p)))
     assert r.signal is Signal.CONTRADICTION and r.evidence == ("NOTE-9",)
+
+
+# ------------------------------------------- HoFC middle rule (single shared name part)
+
+
+def test_middle_rule_shared_surname_with_clearly_different_given_names_clears():
+    p = verified_person("Peter Kowalski")
+    r = one(name.check(ctx(["Kowalski, Andrzej"], p)))
+    assert r.signal is Signal.CONTRADICTION and r.reason is ReasonCode.NAME_MISMATCH_VERIFIED
+    assert "shares only the surname 'Kowalski'" in r.summary and "Peter versus Andrzej" in r.summary
+    assert r.evidence == ("KYC-1",)
+
+
+def test_middle_rule_shared_part_not_hit_surname_does_not_clear():
+    # 'Ridwan, Azeez': Azeez is the listed given name; the name may be reordered.
+    p = verified_person("Chinedu Azeez", cust(full="Ridwan Azeez"))
+    r = one(name.check(ctx(["Ridwan, Azeez"], p)))
+    assert r.signal is Signal.NEUTRAL and r.reason is None
+    assert "not the listed name's surname" in r.summary
+    # the record name agrees, but the verified name outranks it: no agreement either
+    assert "agrees with the hit's name" not in r.summary
+
+
+def test_middle_rule_shared_part_not_customer_surname_does_not_clear():
+    p = verified_person("Jonathan Reyes Whitfield")
+    r = one(name.check(ctx(["Juan Reyes"], p)))
+    assert r.signal is Signal.NEUTRAL and "not the customer's surname" in r.summary
+
+
+def test_middle_rule_initials_do_not_clear():
+    p = verified_person("Christopher Baker")
+    r = one(name.check(ctx(["Baker, Zachary M"], p)))
+    assert r.signal is Signal.NEUTRAL and "initials" in r.summary
+
+
+def test_middle_rule_prefix_or_diminutive_given_names_do_not_clear():
+    p = verified_person("Alexander Brown")
+    r = one(name.check(ctx(["Brown, Alex"], p)))
+    assert r.signal is Signal.NEUTRAL and "could be the same name" in r.summary
+
+
+def test_middle_rule_variant_given_names_do_not_clear():
+    # 'Yusef' is a misspelling of 'Yusuf', listed together with 'Joseph': a variant link.
+    p = verified_person("Joseph Novak Smith")
+    r = one(name.check(ctx(["Smith, Yusef"], p)))
+    assert r.signal is Signal.NEUTRAL and "could be the same name" in r.summary
+
+
+def test_patronymic_surname_never_clears_on_verified_name():
+    p = verified_person("Ibrahim Umar")
+    r = one(name.check(ctx(["Umar, Mohammad"], p)))
+    assert r.signal is Signal.NEUTRAL and "father's given name" in r.summary
+
+
+def test_patronymic_surname_expanded_with_variant_groups():
+    # 'Joseph' is not in the list itself but is listed together with 'Yusuf'.
+    p = verified_person("Daniel Joseph")
+    r = one(name.check(ctx(["Joseph, Peter"], p)))
+    assert r.signal is Signal.NEUTRAL and "father's given name" in r.summary
+
+
+def test_single_joined_part_is_not_an_agreement_or_a_clear():
+    p = verified_person("Redstone Mining Partners Ltd", cust(etype="Company"))
+    r = one(name.check(ctx(["Red Stone, Ltd"], p, company=True)))
+    assert r.signal is Signal.NEUTRAL
+    assert "several parts written together" in r.summary
+
+
+def test_earlier_approved_check_name_agreeing_blocks_clearance():
+    from screening.identity import VerifiedIdentity
+
+    new = VerifiedIdentity(source_id="KYC-NEW", kind="kyc_check", checked_at="2024-01-01",
+                           name="Grace Okafor")
+    old = VerifiedIdentity(source_id="KYC-OLD", kind="kyc_check", checked_at="2019-01-01",
+                           name="Grace Adeyemi Bello")
+    p = Person(records=(cust(full="Grace Okafor"),), identities=(new, old))
+    r = one(name.check(ctx(["Adeyemi Bello, Grace"], p)))
+    assert r.signal is Signal.NEUTRAL and "earlier approved check" in r.summary
 
 
 def test_any_alias_agreeing_prevents_mismatch():

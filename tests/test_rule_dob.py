@@ -276,3 +276,72 @@ def test_partial_date_type_from_verified():
     p = person(verified=SimpleNamespace(source_id="KYC-P", dob=PartialDate(1980, 3), dob_raw="March 1980"))
     r = run(facts(dobs_cand("1980-03-14")), p)
     assert r.signal is Signal.AGREEMENT
+
+
+# ------------------------------------------- HoFC policy calls (all DOBs, partial, news ages)
+
+
+def person_with(*records, verified=None, identities=()):
+    p = person(*records, verified=verified)
+    p.identities = tuple(identities)
+    return p
+
+
+def test_record_dob_that_does_not_contradict_blocks_clearance():
+    # Verified DOB contradicts the hit, but a customer record holds the hit's own date.
+    p = person(record("CUS-1", "1962-09-10"), verified=verified("KYC-2", "1965-03-28"))
+    r = run(facts(dobs_cand("1962-09-10")), p)
+    assert r.signal is Signal.NEUTRAL and r.reason is None
+    assert "another date of birth the bank holds" in r.summary
+
+
+def test_every_held_dob_contradicted_clears_and_cites_verified():
+    p = person(record("CUS-1", "1966-01-01"), verified=verified("KYC-2", "1965-03-28"))
+    r = run(facts(dobs_cand("1962-09-10")), p)
+    assert r.signal is Signal.CONTRADICTION and r.reason is ReasonCode.DOB_MISMATCH
+    assert r.evidence == ("KYC-2",)
+
+
+def test_unreadable_record_dob_blocks_clearance():
+    p = person(record("CUS-1", "31/02/1970"), verified=verified("KYC-2", "1965-03-28"))
+    r = run(facts(dobs_cand("1990-01-01")), p)
+    assert r.signal is Signal.NEUTRAL and "could not be read" in r.summary
+
+
+def test_other_approved_check_dob_blocks_clearance():
+    older = SimpleNamespace(source_id="NOTE-OLD", dob_raw="1990-02-03", dob=None)
+    p = person_with(verified=verified("KYC-2", "1965-03-28"), identities=(older,))
+    r = run(facts(dobs_cand("1990")), p)
+    assert r.signal is Signal.NEUTRAL
+
+
+def test_unreadable_other_approved_check_dob_blocks_clearance():
+    older = SimpleNamespace(source_id="NOTE-OLD", dob_raw="sometime in the 80s", dob=None)
+    p = person_with(verified=verified("KYC-2", "1965-03-28"), identities=(older,))
+    r = run(facts(dobs_cand("1990")), p)
+    assert r.signal is Signal.NEUTRAL and "NOTE-OLD" in r.summary
+
+
+def test_name_plus_partial_dob_confirms():
+    # Age at a date gives 1987 or 1988; a full, year-month or year-only DOB in 1988 agrees.
+    for raw in ("1988-04-28", "1988-04", "1988"):
+        r = run(facts(age_cand(1987)), person(verified=verified("KYC-P", raw)))
+        assert r.signal is Signal.AGREEMENT, raw
+
+
+def test_news_report_age_is_ignored():
+    news = DobCandidate((1974, 1975), None, "According to Daily Wire; May 1, 2020: Lena Varga, 45, was held.",
+                        "profile_notes", "H-T1", True)
+    r = run(facts(news), person(verified=verified("KYC-1", "1990-02-02")))
+    assert r.signal is Signal.NEUTRAL and r.reason is None
+    assert "the hit gives none" in r.summary
+
+
+def test_ages_in_a_news_report_first_paragraph_are_ignored():
+    f = facts(age_cand(1974))
+    hit = Hit.from_raw({"hit_id": "H-T1", "alert_id": "A-T1", "entity_type": "Individual", "name": "Lena Varga",
+                        "profile_notes": "According to Daily Wire; May 1, 2020: Lena Varga, 45, was held."})
+    alert = Alert.from_raw({"alert_id": "A-T1", "entity_type": "Individual"})
+    c = Context(ds=DS, alert=alert, hit=hit, facts=f, person=person(verified=verified("KYC-1", "1990-02-02")))
+    (r,) = dob.check(c)
+    assert r.signal is Signal.NEUTRAL and r.reason is None
