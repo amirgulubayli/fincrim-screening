@@ -120,7 +120,7 @@ def combine_persons(verdicts: list[Verdict]) -> Verdict:
 ENGINES_CONFLICT = "ENGINES_CONFLICT"  # core clears, independent check confirms -> REVIEW
 ENGINES_DISAGREE = "ENGINES_DISAGREE"  # any other disagreement -> 4-eyes tier
 ESCALATED_BY_POLICY = "ESCALATED_BY_POLICY"  # core's cautious policy calls ("Escalated, not cleared")
-_WEAK_TIER_FLAGS = ("DOB_FROM_SEARCH_RESULT", "NAME_FUZZY_MATCH", "NAME_FROM_SCREENED_ONLY",
+_WEAK_TIER_FLAGS = ("DOB_FROM_SEARCH_RESULT", "NAME_FUZZY_MATCH", "NAME_FROM_SCREENED_ONLY", "CUSTOMER_FOUND_BY_SEARCH",
                     "COUNTRY_FROM_SCREENED_ONLY", "NO_CUSTOMER_RECORD", ENGINES_DISAGREE)
 
 
