@@ -85,6 +85,7 @@ class Facet(str, Enum):
     DOB = "dob"
     LOCATION = "location"
     NAME = "name"
+    CORE = "core"  # the decision core's overall verdict (screening.core)
 
 
 CUSTOMER_AMBIGUOUS = "AMBIGUOUS"  # value of customer_record_id when >1 person fits

@@ -1,8 +1,25 @@
-"""End-to-end adjudication. Every hit gets an answer; any error becomes REVIEW (never a clear)."""
+"""End-to-end adjudication. Every hit gets an answer; any error becomes REVIEW (never a clear).
+
+Two independent deterministic engines (dual control):
+
+  core   screening.core   - the reviewed AML Bot engine (PR #28): authoritative decision,
+                            reason code, customer, reason text and evidence.
+  check  modular rules    - resolve -> facts -> rules/* -> compiler: an independent second
+                            opinion that also yields the per-facet trace for the UI.
+
+merge (compiler.merge_with_core):
+  * the core decides;
+  * core clears but the check CONFIRMS (name + DOB agree)  -> REVIEW (never clear on a conflict);
+  * any other disagreement                                  -> flag ENGINES_DISAGREE (4-eyes tier).
+
+SCREEN_ENGINE=check|core|combined (default combined) selects the engine, e.g. for rule work.
+"""
 
 from __future__ import annotations
 
-from .compiler import Verdict, combine_persons, compile_person
+import os
+
+from .compiler import Verdict, combine_persons, compile_person, merge_with_core
 from .contracts import Decision, HitDecision, ReasonCode, RuleResult, Tier
 from .explain import evidence_ids, reason_text
 from .facts import gather_hit_facts
@@ -11,8 +28,16 @@ from .resolve import resolve_customer
 from .rules import RULES, Context
 from .triage import assign_tier, flags_for
 
+ENGINES = ("combined", "core", "check")
 
-def adjudicate(ds: Dataset, hit_id: str) -> HitDecision:
+
+def engine_mode() -> str:
+    mode = os.environ.get("SCREEN_ENGINE", "combined").strip().lower()
+    return mode if mode in ENGINES else "combined"
+
+
+def check_hit(ds: Dataset, hit_id: str) -> HitDecision:
+    """The modular, facet-by-facet engine (independent second check)."""
     hit = ds.hits[hit_id]
     alert = ds.alerts.get(hit.alert_id)
     if alert is None:
@@ -48,6 +73,22 @@ def adjudicate(ds: Dataset, hit_id: str) -> HitDecision:
     )
 
 
+def adjudicate(ds: Dataset, hit_id: str, mode: str | None = None) -> HitDecision:
+    mode = mode or engine_mode()
+    if mode == "check":
+        return check_hit(ds, hit_id)
+    from .core import core_results
+
+    core = core_results(ds).get(hit_id)
+    if mode == "core":
+        return merge_with_core(core, None, hit_id, ds.hits[hit_id].alert_id)
+    try:
+        check = check_hit(ds, hit_id)
+    except Exception as exc:  # noqa: BLE001 - the check failing must not block the core
+        check = fallback(hit_id, ds.hits[hit_id].alert_id, f"CHECK_ERROR:{type(exc).__name__}")
+    return merge_with_core(core, check, hit_id, ds.hits[hit_id].alert_id)
+
+
 def fallback(hit_id: str, alert_id: str, flag: str) -> HitDecision:
     return HitDecision(
         hit_id=hit_id,
@@ -62,11 +103,12 @@ def fallback(hit_id: str, alert_id: str, flag: str) -> HitDecision:
     )
 
 
-def run(ds: Dataset) -> list[HitDecision]:
+def run(ds: Dataset, mode: str | None = None) -> list[HitDecision]:
+    mode = mode or engine_mode()
     out: list[HitDecision] = []
     for hit_id in sorted(ds.hits):
         try:
-            out.append(adjudicate(ds, hit_id))
+            out.append(adjudicate(ds, hit_id, mode))
         except Exception as exc:  # noqa: BLE001 - safety net: errors never clear a hit
             out.append(fallback(hit_id, ds.hits[hit_id].alert_id, f"ENGINE_ERROR:{type(exc).__name__}"))
     return out
