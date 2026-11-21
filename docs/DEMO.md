@@ -54,7 +54,6 @@ loaded) rather than running `explain` live.
 | AUTO_CLEAR | `H-58A39C` | DIFFERENT_ENTITY / DOB_MISMATCH | - | approved KYC DOB (KYC-232AE0) contradicts the hit's only DOB; both engines agree; practice label DIFFERENT |
 | AUTO_ESCALATE | `H-4D76E3` | SAME_ENTITY / NAME_DOB_LOCATION_MATCH | - | identity merge (CUS-970916 + CUS-906311); latest approved check NOTE-4E8A14 matches; practice label SAME |
 | BORDERLINE (engines disagree) | `H-AF6CD2` | DIFFERENT_ENTITY / LOCATION_MISMATCH, customer AMBIGUOUS | `ENGINES_DISAGREE` | core clears two candidate customers on location; check holds back because birth years are close |
-| BORDERLINE (engines disagree, alt.) | `H-2C6B2E` | SAME_ENTITY / NAME_DOB_LOCATION_MATCH | `ENGINES_DISAGREE` | core confirms on a birth year from a search result (SR-1054CF); check reads a full DOB in the hit's profile that differs from the customer's (NOTE-BCDE4B); escalation stands, 4-eyes |
 | BORDERLINE (weak fact) | `H-622EDD` | DIFFERENT_ENTITY / DOB_MISMATCH | `DOB_FROM_SEARCH_RESULT` | the hit's DOB exists only in a web search result (SR-A88751); practice label DIFFERENT |
 | HUMAN_REVIEW (policy) | `H-B1018D` | REVIEW / INSUFFICIENT_DATA | `ESCALATED_BY_POLICY`, `ENGINES_DISAGREE` | Serbia vs Montenegro, former single state: escalated with reviewer guidance |
 | HUMAN_REVIEW (plain) | `H-A22C42` | REVIEW / INSUFFICIENT_DATA | - | name and country agree but the hit has no DOB; practice label REVIEW |

@@ -45,12 +45,12 @@ export const TOUR: TourStep[] = [
     focus: "reviewer",
   },
   {
-    hit: "H-2C6B2E",
+    hit: "H-373F2A",
     tier: "BORDERLINE",
     title: "The engines disagree: four eyes",
     caption:
-      "The core confirms on a birth year from a web search result; the independent check reads a full DOB in the hit's profile that differs from the customer's. The escalation stands, but a second, different analyst must confirm it.",
-    spotlight: ["SR-1054CF", "NOTE-BCDE4B"],
+      "The core clears on location: the customer is tied only to the US, the hit only to the UK. The independent check holds back: the verified date of birth agrees with the hit's, and the name shares one part. The clearance stands, but a second, different analyst must confirm it before the alert closes.",
+    spotlight: ["NOTE-F9A1C8", "CUS-464278"],
     focus: "engines",
   },
 ];
