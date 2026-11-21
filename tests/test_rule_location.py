@@ -3,6 +3,8 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from screening.compiler import compile_person
 from screening.contracts import (
     Alert,
@@ -258,3 +260,136 @@ def test_deterministic_regardless_of_claim_order():
     )
     hit = make_hit(countries=["United Kingdom"])
     assert run(a, hit) == run(b, hit)
+
+
+# ------------------------------------------- Head of Financial Crime policy calls
+
+
+@pytest.mark.parametrize(
+    ("cust", "hit_country", "state"),
+    [
+        ("Serbia", "Montenegro", "Yugoslavia"),
+        ("Serbia", "Kosovo", "Yugoslavia"),
+        ("Croatia", "Slovenia", "Yugoslavia"),
+        ("Russia", "Ukraine", "Soviet Union"),
+        ("Lithuania", "Kazakhstan", "Soviet Union"),
+        ("Czech Republic", "Slovakia", "Czechoslovakia"),
+        ("Sudan", "South Sudan", "Sudan"),
+        ("Eritrea", "Ethiopia", "Ethiopia"),
+    ],
+)
+def test_countries_that_were_one_state_do_not_contradict(cust, hit_country, state):
+    r = only(run(new_person(claim(cust)), make_hit(countries=[hit_country])))
+    assert r.signal is Signal.NEUTRAL
+    assert r.reason is None
+    assert state in r.summary and "not a location mismatch" in r.summary
+
+
+def test_neighbours_never_unified_still_contradict():
+    r = only(run(new_person(claim("Serbia")), make_hit(countries=["Hungary"])))
+    assert r.signal is Signal.CONTRADICTION
+    assert r.reason is ReasonCode.LOCATION_MISMATCH
+
+
+def test_former_state_member_on_both_sides_is_enough():
+    # one side also has an unrelated country: still no clearance
+    person = new_person(claim("Serbia"), claim("Germany", "CUS-1", "nationality"))
+    r = only(run(person, make_hit(countries=["Bosnia and Herzegovina"])))
+    assert r.signal is Signal.NEUTRAL
+
+
+def test_business_address_only_hit_does_not_support_location_clear():
+    hit = make_hit(addresses=["1 Main Street, Toronto, Canada [Business]", "Ottawa, Canada [Business]"])
+    r = only(run(new_person(claim("Netherlands")), hit))
+    assert r.signal is Signal.NEUTRAL
+    assert "business address in Canada" in r.summary
+
+
+def test_business_address_plus_other_country_link_still_contradicts():
+    hit = make_hit(addresses=["1 Main Street, Toronto, Canada [Business]", "Canada [Residency]"])
+    assert only(run(new_person(claim("Netherlands")), hit)).signal is Signal.CONTRADICTION
+    hit = make_hit(countries=["Canada"], addresses=["1 Main Street, Toronto, Canada [Business]"])
+    assert only(run(new_person(claim("Netherlands")), hit)).signal is Signal.CONTRADICTION
+
+
+def test_business_address_rule_is_for_individuals_only():
+    hit = make_hit(entity_type="Company", name="Varga Ltd", addresses=["Toronto, Canada [Business]"])
+    r = only(run(new_person(claim("Netherlands")), hit))
+    assert r.signal is Signal.CONTRADICTION
+
+
+def test_every_country_named_in_any_note_counts():
+    # the resolver's claims carry no note residence, but a note names the hit's country
+    person = new_person(claim("Germany"))
+    person.notes = (
+        Note.from_raw({"note_id": "NOTE-7", "text": "Called about a transfer to family in Brazil."}),
+    )
+    r = only(run(person, make_hit(countries=["Brazil"])))
+    assert r.signal is Signal.AGREEMENT
+    assert r.evidence == ("NOTE-7",)
+    assert r.weak and r.weak_why == location.WEAK_NOTE_TEXT
+
+
+def test_note_mentions_extend_the_customer_set_and_are_cited():
+    person = new_person(claim("Germany"))
+    person.notes = (Note.from_raw({"note_id": "NOTE-7", "text": "Moved here from Austria."}),)
+    r = only(run(person, make_hit(countries=["Brazil"])))
+    assert r.signal is Signal.CONTRADICTION
+    assert "Austria, Germany" in r.summary
+    assert r.evidence == ("CUS-1", "NOTE-7")
+
+
+# ------------------------------------------------------- name + DOB guard (R6)
+
+
+def _agree(facet):
+    return lambda ctx: [RuleResult(f"P6.{facet.value}", facet, Signal.AGREEMENT, "agree")]
+
+
+def test_name_and_dob_agreement_lets_the_compiler_escalate(monkeypatch):
+    monkeypatch.setattr(location.name_rule, "check", _agree(Facet.NAME))
+    monkeypatch.setattr(location.dob_rule, "check", _agree(Facet.DOB))
+    hit = make_hit(countries=["Canada"], dobs=["1995-01-25"])
+    person = new_person(claim("United States"))
+    person.verified_dob = "1995-01-25"
+    loc = only(run(person, hit))
+    assert loc.signal is Signal.CONTRADICTION  # emitted so the compiler can apply SOP P6
+    name = RuleResult("P6.name", Facet.NAME, Signal.AGREEMENT, "names agree")
+    dob = RuleResult("P6.dob", Facet.DOB, Signal.AGREEMENT, "dobs agree")
+    v = compile_person([name, dob, loc], is_company=False, record_id="CUS-1")
+    assert v.decision is Decision.REVIEW
+
+
+def test_name_and_dob_agreement_escalates_even_between_former_states(monkeypatch):
+    monkeypatch.setattr(location.name_rule, "check", _agree(Facet.NAME))
+    monkeypatch.setattr(location.dob_rule, "check", _agree(Facet.DOB))
+    r = only(run(new_person(claim("Serbia")), make_hit(countries=["Montenegro"])))
+    assert r.signal is Signal.CONTRADICTION
+
+
+def test_same_year_but_different_full_dates_do_not_block():
+    hit = make_hit(countries=["Iraq"], dobs=["1983-08-28"])
+    person = new_person(claim("United States"))
+    person.verified_dob = "1983-04-27"
+    alert = Alert.from_raw({"alert_id": "A-T1", "customer_name": "Lena Varga", "dob": "1983"})
+    # the screened year-only DOB is a copy of what is on file, not a second DOB
+    assert only(run(person, hit, alert)).signal is Signal.CONTRADICTION
+
+
+def test_screened_dob_used_when_nothing_on_file():
+    hit = make_hit(countries=["Iraq"], dobs=["1983-08-28"])
+    alert = Alert.from_raw({"alert_id": "A-T1", "customer_name": "Lena Varga", "dob": "1983"})
+    assert only(run(new_person(claim("United States")), hit, alert)).signal is Signal.NEUTRAL
+
+
+def test_unreadable_dob_with_agreeing_name_blocks(monkeypatch):
+    monkeypatch.setattr(location.name_rule, "check", _agree(Facet.NAME))
+    hit = make_hit(countries=["Canada"], dobs=["sometime in the seventies"])
+    r = only(run(new_person(claim("United States")), hit))
+    assert r.signal is Signal.NEUTRAL
+    assert "could not be read" in r.summary
+
+
+def test_unreadable_dob_without_name_agreement_still_contradicts():
+    hit = make_hit(countries=["Canada"], dobs=["sometime in the seventies"])
+    assert only(run(new_person(claim("United States")), hit)).signal is Signal.CONTRADICTION
